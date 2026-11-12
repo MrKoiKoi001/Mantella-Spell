@@ -1,0 +1,22 @@
+FormKey: 000800:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_Quest
+VirtualMachineAdapter:
+  Scripts:
+  - Name: KI_MCP_Gefaehrte_Loop
+  FileName: ''
+  Aliases:
+  - Property:
+      Name: ''
+      Object: 000800:KI_MCP_Gefaehrte.esp
+      Alias: 0
+    Scripts:
+    - Name: KI_MCP_Gefaehrte_PlayerAlias
+Flags:
+- StartGameEnabled
+- 0x10
+NextAliasID: 1
+Aliases:
+- Name: PlayerAlias
+  Flags: []
+  ForcedReference: 000014:Skyrim.esm
+  VoiceTypes: Null
