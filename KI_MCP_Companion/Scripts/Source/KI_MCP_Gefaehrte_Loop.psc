@@ -53,7 +53,11 @@ int Property FormTypePotion = 46 AutoReadOnly
 ; Hands for Actor.GetEquippedObject
 int Property HandLeft = 0 AutoReadOnly
 int Property HandRight = 1 AutoReadOnly
-; Own event that starts the walk of move_to. Walking makes a script wait until the character has arrived,
+; Numbers per character in the list "nearby" (see AddNearbyToState)
+int Property ValuesPerNearby = 5 AutoReadOnly
+; For loot: this close to a body the companion can reach what the body carries
+float Property LootReachMeters = 3.0 AutoReadOnly
+; Own event that starts the walk of move_to and loot. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
 
@@ -82,6 +86,11 @@ string Property KEY_COMMAND_COUNT = "companion_count" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
+; What the dead character carries that the target of the report_state command names
+string Property INVENTORY_CORPSE = "corpse" AutoReadOnly
+; For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything
+string Property KEY_COMMAND_ITEM_HIGH = "companion_item_high" AutoReadOnly
+string Property KEY_COMMAND_ITEM_LOW = "companion_item_low" AutoReadOnly
 string Property ACTION_REPORT_STATE = "report_state" AutoReadOnly
 string Property ACTION_FOLLOW = "follow" AutoReadOnly
 string Property ACTION_WAIT = "wait" AutoReadOnly
@@ -93,6 +102,7 @@ string Property ACTION_EQUIP = "equip" AutoReadOnly
 string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
 string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
+string Property ACTION_LOOT = "loot" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -101,8 +111,15 @@ int _pollId = 0
 bool _isContactShown = false
 ; The follower quest of the game, looked up once
 DialogueFollowerScript _followerQuest
-; Whom the companion is walking to at the moment because of move_to (None = nobody)
+; Whom the companion is walking to at the moment because of move_to or loot (None = nobody)
 Actor _walkTarget
+; loot: the walk that is running leads to a body. What to take there (None = everything),
+; and whether the companion followed the player before and should do so again afterwards
+bool _isLootWalk = false
+Form _lootItem
+bool _followAfterLoot = false
+; What became of commands that take time (loot, move_to), as text for the AI. Goes out with the next state
+string _report = ""
 ; Goes up with every command. A walk that was started under an older number has been replaced and stays silent
 int _walkNumber = 0
 ; Who is retreating at the moment because of flee (None = nobody), and how brave that character was before
@@ -116,6 +133,8 @@ bool _isHearing = false
 Form _gold
 ; Whose inventory the next state should carry (see INVENTORY_...). Set by a report_state command, used up by BuildState
 string _wantedInventory = ""
+; For INVENTORY_CORPSE: whose body that is
+Actor _wantedCorpse
 
 ; --------------------------------------------------------------------- events
 
@@ -313,6 +332,18 @@ int Function BuildState()
     If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
         AddInventoryToState(stateHandle, companion, "inventory_own")
     EndIf
+    If wantedInventory == INVENTORY_CORPSE
+        AddCorpseToState(stateHandle, _wantedCorpse)
+    EndIf
+    _wantedCorpse = None
+
+    ; What became of loot and move_to since the last state. The text is taken out first,
+    ; because a walk that ends while this script waits for the game adds to it
+    string report = _report
+    _report = ""
+    If report != ""
+        SetStringSafely(stateHandle, "report", report)
+    EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
     AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget)
@@ -330,7 +361,7 @@ EndFunction
 ; Ref ID, health in percent, dead, in combat, waiting, in the loaded area, distance to the player in meters,
 ; angle from where the player faces to the companion in degrees (negative = left, positive = right),
 ; ref ID of whom the companion fights (0 = nobody), direction the companion faces in degrees (0 = north, 90 = east),
-; retreating because of flee, ref ID of whom the companion is walking to because of move_to (0 = nobody)
+; retreating because of flee, ref ID of whom the companion is walking to because of move_to or loot (0 = nobody)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
     int[] companionValues = new int[12]
     companionValues[0] = companion.GetFormID()
@@ -425,16 +456,31 @@ Function AddInventoryToState(int stateHandle, Actor owner, string keyName)
     SKSE_HTTP.setStringArray(stateHandle, keyName + "_names", itemNames)
 EndFunction
 
+; What a dead character carries, for loot: its ref ID under "corpse", its name under "corpse_name",
+; and its things under "inventory_corpse" like the other inventories.
+; Nothing at all if there is no such body in the loaded area
+Function AddCorpseToState(int stateHandle, Actor corpse)
+    If !corpse || !corpse.IsDead() || !corpse.Is3DLoaded()
+        Return
+    EndIf
+    int[] corpseValues = new int[1]
+    corpseValues[0] = corpse.GetFormID()
+    SKSE_HTTP.setIntArray(stateHandle, "corpse", corpseValues)
+    SetStringSafely(stateHandle, "corpse_name", corpse.GetDisplayName())
+    AddInventoryToState(stateHandle, corpse, "inventory_corpse")
+EndFunction
+
 ; ------------------------------------------------------------------- nearby
-; The living characters around the player, without the player and the companion.
-; If there are more than fit into the list, the closest ones win. The server sorts the list by distance.
-; If nobody is around, the state gets no "nearby" entries at all
+; The characters around the player, living and dead, without the player and the companion.
+; If there are more than fit into the list, the living win over the dead, and among each the closest ones.
+; The server sorts the list. If nobody is around, the state gets no "nearby" entries at all
 
 Function AddNearbyToState(int stateHandle, Actor player, float playerX, float playerY, float playerZ, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget)
     ; The length of these two arrays is the highest number of characters that get listed.
     ; Papyrus only takes a plain number as the length of a new array
     Actor[] found = new Actor[10]
     float[] distances = new float[10]
+    bool[] deadFlags = new bool[10]
     ; Characters that were looked at and do not belong into the list. Outdoors the same character
     ; is drawn several times, and with this list looking at it again costs no question to the game
     Actor[] rejected = new Actor[20]
@@ -442,20 +488,20 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
     float radius = NearbyRadiusMeters * GameUnitsPerMeter
 
     ; Whoever the companion fights belongs into the list first
-    foundCount = AddNearbyActor(found, distances, rejected, foundCount, companionTarget, player, companion, radius)
+    foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, radius)
 
     If playerCell
         int refCount = playerCell.GetNumRefs(FormTypeNpc)
         int refIndex = 0
         While refIndex < refCount
-            foundCount = AddNearbyActor(found, distances, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius)
+            foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius)
             refIndex += 1
         EndWhile
 
         If !isInterior
             int sampleIndex = 0
             While sampleIndex < RandomSampleCount
-                foundCount = AddNearbyActor(found, distances, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
+                foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
                 sampleIndex += 1
             EndWhile
         EndIf
@@ -465,20 +511,25 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
         Return
     EndIf
 
-    ; Four numbers per character: ref ID, distance to the player in meters,
-    ; angle from where the player faces to the character in degrees (negative = left, positive = right), hostile to the player
-    int[] nearbyValues = Utility.CreateIntArray(foundCount * 4)
+    ; Five numbers per character: ref ID, distance to the player in meters,
+    ; angle from where the player faces to the character in degrees (negative = left, positive = right),
+    ; hostile to the player (always 0 for the dead), dead
+    int[] nearbyValues = Utility.CreateIntArray(foundCount * ValuesPerNearby)
     ; One text per character: its place in the list, a colon and its name, eg "0:Bandit".
     ; SKSE_HTTP drops every name that is not valid UTF-8 without a word, so the server could not count the places
     string[] nearbyNames = Utility.CreateStringArray(foundCount)
     int index = 0
     While index < foundCount
         Actor nearbyActor = found[index]
-        int valueIndex = index * 4
+        int valueIndex = index * ValuesPerNearby
         nearbyValues[valueIndex] = nearbyActor.GetFormID()
         nearbyValues[valueIndex + 1] = ToMeters(distances[index])
         nearbyValues[valueIndex + 2] = player.GetHeadingAngle(nearbyActor) as int
-        nearbyValues[valueIndex + 3] = ToNumber(nearbyActor.IsHostileToActor(player))
+        If deadFlags[index]
+            nearbyValues[valueIndex + 4] = 1
+        Else
+            nearbyValues[valueIndex + 3] = ToNumber(nearbyActor.IsHostileToActor(player))
+        EndIf
         nearbyNames[index] = (index as string) + ":" + nearbyActor.GetDisplayName()
         index += 1
     EndWhile
@@ -486,9 +537,9 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
     SKSE_HTTP.setStringArray(stateHandle, "nearby_names", nearbyNames)
 EndFunction
 
-; Puts the candidate into the list if it is a living character in reach that is not listed yet.
+; Puts the candidate into the list if it is a character in reach, living or dead, that is not listed yet.
 ; Returns the new number of listed characters
-int Function AddNearbyActor(Actor[] found, float[] distances, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius)
+int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius)
     If !candidate || candidate == player || candidate == companion
         Return foundCount
     EndIf
@@ -498,30 +549,45 @@ int Function AddNearbyActor(Actor[] found, float[] distances, Actor[] rejected, 
     ; The distance comes first because most characters that do not belong into the list are too far away.
     ; Disabled characters and characters outside the loaded area have no body in the world
     float distance = candidate.GetDistance(player)
-    If distance > radius || candidate.IsDead() || !candidate.Is3DLoaded()
+    If distance > radius || !candidate.Is3DLoaded()
         RememberRejected(rejected, candidate)
         Return foundCount
     EndIf
+    bool isDead = candidate.IsDead()
 
     If foundCount < found.Length
         found[foundCount] = candidate
         distances[foundCount] = distance
+        deadFlags[foundCount] = isDead
         Return foundCount + 1
     EndIf
 
-    ; The list is full: the candidate takes the place of the farthest one if it is closer
-    int farthestIndex = 0
-    int index = 1
+    ; The list is full. The living come first: a living candidate takes the place of the farthest dead one.
+    ; Among its own kind (living or dead) the candidate takes the place of the farthest one if it is closer
+    int farthestLiving = -1
+    int farthestDead = -1
+    int index = 0
     While index < foundCount
-        If distances[index] > distances[farthestIndex]
-            farthestIndex = index
+        If deadFlags[index]
+            If farthestDead < 0 || distances[index] > distances[farthestDead]
+                farthestDead = index
+            EndIf
+        ElseIf farthestLiving < 0 || distances[index] > distances[farthestLiving]
+            farthestLiving = index
         EndIf
         index += 1
     EndWhile
-    If distance < distances[farthestIndex]
-        RememberRejected(rejected, found[farthestIndex])
-        found[farthestIndex] = candidate
-        distances[farthestIndex] = distance
+    int placeToTake = -1
+    If farthestDead >= 0 && (!isDead || distance < distances[farthestDead])
+        placeToTake = farthestDead
+    ElseIf !isDead && farthestLiving >= 0 && distance < distances[farthestLiving]
+        placeToTake = farthestLiving
+    EndIf
+    If placeToTake >= 0
+        RememberRejected(rejected, found[placeToTake])
+        found[placeToTake] = candidate
+        distances[placeToTake] = distance
+        deadFlags[placeToTake] = isDead
     Else
         RememberRejected(rejected, candidate)
     EndIf
@@ -547,6 +613,9 @@ int[] Function RunCommands(int[] commandHandles)
             resultCount += 1
         Else
             _wantedInventory = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_DETAIL, "")
+            If _wantedInventory == INVENTORY_CORPSE
+                _wantedCorpse = GetTargetActor(commandHandles[index])
+            EndIf
         EndIf
         index += 1
     EndWhile
@@ -576,7 +645,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -591,18 +660,34 @@ int Function RunCommand(int commandHandle, string actionName)
         EndIf
     Else
         Actor target = None
-        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO
+        Form lootItem = None
+        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT
             target = GetTargetActor(commandHandle)
             resultText = GetTargetProblem(companion, target, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), actionName == ACTION_ATTACK)
         EndIf
+        If resultText == "" && actionName == ACTION_LOOT
+            int itemHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
+            int itemLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+            lootItem = GetFormFromHalves(itemHigh, itemLow)
+            resultText = GetLootProblem(target, lootItem, itemHigh != 0 || itemLow != 0)
+        EndIf
         If resultText == ""
             isOk = true
-            ; A new command ends what the one before started: the walk of move_to and the retreat of flee
+            ; A loot that gets cut short had made the companion wait, although it was following the player
+            bool followAgain = _isLootWalk && _followAfterLoot
+            ; A new command ends what the one before started: the walk of move_to and loot, and the retreat of flee
             EndWalk()
             If actionName != ACTION_FLEE
                 StopFleeing()
             EndIf
-            resultText = DoCommand(companion, actionName, target)
+            If actionName == ACTION_LOOT
+                resultText = StartLoot(companion, target, lootItem, followAgain)
+            Else
+                If followAgain && actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_MOVE_TO
+                    SetWaiting(companion, false)
+                EndIf
+                resultText = DoCommand(companion, actionName, target)
+            EndIf
         EndIf
     EndIf
 
@@ -617,7 +702,7 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO
+    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT
 EndFunction
 
 bool Function IsItemAction(string actionName)
@@ -671,6 +756,11 @@ EndFunction
 Form Function GetTargetForm(int commandHandle)
     int highHalf = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_HIGH, 0)
     int lowHalf = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_LOW, 0)
+    Return GetFormFromHalves(highHalf, lowHalf)
+EndFunction
+
+; Puts the two halves of an ID together again and looks up what has that ID (None = nothing, or both halves 0)
+Form Function GetFormFromHalves(int highHalf, int lowHalf)
     int formId = Math.LogicalOr(Math.LeftShift(highHalf, 16), lowHalf)
     If formId == 0
         Return None
@@ -760,8 +850,85 @@ string Function GetTargetProblem(Actor companion, Actor target, string targetTex
     Return ""
 EndFunction
 
+; ----------------------------------------------------------------------- loot
+; loot: the companion walks to a dead character and takes what it carries: one kind of item or everything.
+; The walk takes time, so the command only starts it. What came of it goes out with the next state (_report)
+
+; Returns why the companion cannot loot the target, or "" if it can.
+; isItemNamed: the command names one item (None = it named something that is no item), otherwise everything is meant
+string Function GetLootProblem(Actor target, Form item, bool isItemNamed)
+    If !target.IsDead()
+        Return target.GetDisplayName() + " is alive. You can only loot the dead."
+    EndIf
+    If isItemNamed
+        If !item || (item as ObjectReference)
+            Return "The ID in 'detail' is not an item. Take it from the list STATE gives you for this body (argument 'corpse')."
+        EndIf
+        If target.GetItemCount(item) <= 0
+            Return "The body of " + target.GetDisplayName() + " has no " + item.GetName() + "."
+        EndIf
+    ElseIf target.GetNumItems() == 0
+        Return "The body of " + target.GetDisplayName() + " carries nothing."
+    EndIf
+    Return ""
+EndFunction
+
+; Sends the companion to the body. Only call this after the command was checked.
+; followAgain: a loot that this one replaces had already made a following companion wait
+string Function StartLoot(Actor companion, Actor corpse, Form item, bool followAgain)
+    ; Afterwards the companion does again what it did before: follow the player or wait
+    _followAfterLoot = followAgain || !IsWaiting(companion)
+    ; Waiting comes first, as for move_to
+    SetWaiting(companion, true)
+    _isLootWalk = true
+    _lootItem = item
+    _walkTarget = corpse
+    SendModEvent(EVENT_WALK, "", _walkNumber as float)
+    string what = "everything it carries"
+    If item
+        what = item.GetName()
+    EndIf
+    Return "You walk to the body of " + corpse.GetDisplayName() + " to take " + what + ". Your next STATE tells you what you got."
+EndFunction
+
+; Called when the walk to the body is over. Takes the things if the companion stands close enough
+Function FinishLoot(Actor companion, Actor corpse, Form item, int ownWalkNumber)
+    string corpseName = corpse.GetDisplayName()
+    If !corpse.Is3DLoaded() || companion.GetDistance(corpse) > LootReachMeters * GameUnitsPerMeter
+        AddReport("You did not get to the body of " + corpseName + " and took nothing.")
+        Debug.Notification("AI companion: did not get to the body of " + corpseName)
+    ElseIf item
+        int count = corpse.GetItemCount(item)
+        If count > 0
+            ; The "true" keeps the game from showing a message
+            corpse.RemoveItem(item, count, true, companion)
+            AddReport("You took " + count + " " + item.GetName() + " from the body of " + corpseName + ".")
+        Else
+            AddReport("The body of " + corpseName + " had no " + item.GetName() + " any more.")
+        EndIf
+    Else
+        int kindCount = corpse.GetNumItems()
+        ; The last "false": things that belong to a quest stay on the body
+        corpse.RemoveAllItems(companion, false, false)
+        AddReport("You took everything from the body of " + corpseName + ": " + kindCount + " kinds of items.")
+    EndIf
+    ; A newer command has the last word on following and waiting
+    If _followAfterLoot && ownWalkNumber == _walkNumber
+        SetWaiting(companion, false)
+    EndIf
+EndFunction
+
+; Keeps a text for the AI until the next state goes out
+Function AddReport(string reportText)
+    If _report == ""
+        _report = reportText
+    Else
+        _report = _report + " " + reportText
+    EndIf
+EndFunction
+
 ; ----------------------------------------------------------------------- walk
-; move_to: the companion walks to a character and waits there
+; move_to: the companion walks to a character and waits there. loot walks the same way, to a body
 
 ; Raised by DoCommand. numArg is the number of the command that asked for the walk
 Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender)
@@ -771,6 +938,8 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     If ownWalkNumber != _walkNumber || !companion || !walkTarget
         Return
     EndIf
+    bool isLootWalk = _isLootWalk
+    Form lootItem = _lootItem
     ; This call only comes back when the companion has arrived, found no way or was sent somewhere else
     bool hasArrived = companion.PathToReference(walkTarget, WalkSpeed)
     If ownWalkNumber != _walkNumber
@@ -778,7 +947,14 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         Return
     EndIf
     _walkTarget = None
+    If isLootWalk
+        _isLootWalk = false
+        _lootItem = None
+        FinishLoot(companion, walkTarget, lootItem, ownWalkNumber)
+        Return
+    EndIf
     If !hasArrived
+        AddReport("You did not get to " + walkTarget.GetDisplayName() + ".")
         Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
     EndIf
 EndEvent
@@ -787,6 +963,8 @@ EndEvent
 Function EndWalk()
     _walkNumber += 1
     _walkTarget = None
+    _isLootWalk = false
+    _lootItem = None
 EndFunction
 
 ; ----------------------------------------------------------------------- flee
