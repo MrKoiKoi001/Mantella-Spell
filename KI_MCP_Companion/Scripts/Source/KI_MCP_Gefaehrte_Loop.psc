@@ -36,6 +36,23 @@ int Property MaxQuests = 25 AutoReadOnly
 int Property NativeVersionWithHearing = 2 AutoReadOnly
 ; At most this many lines that were heard go to the server with one state
 int Property MaxHeardLines = 20 AutoReadOnly
+; Gold is an item like any other. This is its form ID in Skyrim.esm
+int Property GoldFormId = 0x0000000F AutoReadOnly
+string Property GoldFile = "Skyrim.esm" AutoReadOnly
+; At most this many kinds of items of one inventory go to the server. Every item costs several questions to the game
+int Property MaxInventoryItems = 120 AutoReadOnly
+; Numbers per item in the inventory lists: form ID, how many, form type, worn or held (see AddInventoryToState)
+int Property ValuesPerItem = 4 AutoReadOnly
+; Form types as SKSE numbers them (Form.GetType). Only these kinds can be worn or held
+int Property FormTypeArmor = 26 AutoReadOnly
+int Property FormTypeLight = 31 AutoReadOnly
+int Property FormTypeWeapon = 41 AutoReadOnly
+int Property FormTypeAmmo = 42 AutoReadOnly
+; Potions, poisons and food
+int Property FormTypePotion = 46 AutoReadOnly
+; Hands for Actor.GetEquippedObject
+int Property HandLeft = 0 AutoReadOnly
+int Property HandRight = 1 AutoReadOnly
 ; Own event that starts the walk of move_to. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
@@ -58,6 +75,13 @@ string Property KEY_COMMAND_ACTION = "companion_action" AutoReadOnly
 string Property KEY_COMMAND_TARGET = "companion_target" AutoReadOnly
 string Property KEY_COMMAND_TARGET_HIGH = "companion_target_high" AutoReadOnly
 string Property KEY_COMMAND_TARGET_LOW = "companion_target_low" AutoReadOnly
+; For report_state: whose inventory the state should carry (see INVENTORY_...), or empty for none
+string Property KEY_COMMAND_DETAIL = "companion_detail" AutoReadOnly
+; For give and take: how many of the item (0 = all of them)
+string Property KEY_COMMAND_COUNT = "companion_count" AutoReadOnly
+string Property INVENTORY_OWN = "own" AutoReadOnly
+string Property INVENTORY_PLAYER = "player" AutoReadOnly
+string Property INVENTORY_BOTH = "both" AutoReadOnly
 string Property ACTION_REPORT_STATE = "report_state" AutoReadOnly
 string Property ACTION_FOLLOW = "follow" AutoReadOnly
 string Property ACTION_WAIT = "wait" AutoReadOnly
@@ -65,6 +89,10 @@ string Property ACTION_ATTACK = "attack" AutoReadOnly
 string Property ACTION_STAND_DOWN = "stand_down" AutoReadOnly
 string Property ACTION_FLEE = "flee" AutoReadOnly
 string Property ACTION_MOVE_TO = "move_to" AutoReadOnly
+string Property ACTION_EQUIP = "equip" AutoReadOnly
+string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
+string Property ACTION_GIVE = "give" AutoReadOnly
+string Property ACTION_TAKE = "take" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -84,6 +112,10 @@ float _confidenceBeforeFlee = 0.0
 int _nativeVersion = 0
 ; Whether the SKSE plugin listens to what characters say (it could hook into the subtitles of the game)
 bool _isHearing = false
+; The item "gold", looked up once
+Form _gold
+; Whose inventory the next state should carry (see INVENTORY_...). Set by a report_state command, used up by BuildState
+string _wantedInventory = ""
 
 ; --------------------------------------------------------------------- events
 
@@ -258,6 +290,30 @@ int Function BuildState()
         SKSE_HTTP.setIntArray(stateHandle, "companion", BuildCompanionValues(companion, player, companionTarget))
     EndIf
 
+    ; Gold of the player and of the companion (0 without a companion)
+    int[] goldValues = new int[2]
+    Form gold = GetGold()
+    If gold
+        goldValues[0] = player.GetItemCount(gold)
+        If companion
+            goldValues[1] = companion.GetItemCount(gold)
+        EndIf
+    EndIf
+    SKSE_HTTP.setIntArray(stateHandle, "gold", goldValues)
+    If companion
+        AddHandsToState(stateHandle, companion)
+    EndIf
+
+    ; A whole inventory costs seconds, so it only goes along when the server asked for it
+    string wantedInventory = _wantedInventory
+    _wantedInventory = ""
+    If wantedInventory == INVENTORY_PLAYER || wantedInventory == INVENTORY_BOTH
+        AddInventoryToState(stateHandle, player, "inventory_player")
+    EndIf
+    If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
+        AddInventoryToState(stateHandle, companion, "inventory_own")
+    EndIf
+
     float scanStartTime = Utility.GetCurrentRealTime()
     AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget)
 
@@ -297,6 +353,76 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[11] = _walkTarget.GetFormID()
     EndIf
     Return companionValues
+EndFunction
+
+; ---------------------------------------------------------------- inventory
+
+Form Function GetGold()
+    If !_gold
+        _gold = Game.GetFormFromFile(GoldFormId, GoldFile)
+    EndIf
+    Return _gold
+EndFunction
+
+; What the companion holds: always two texts, "R:" and "L:" followed by the name of what is in that hand (nothing = empty hand).
+; A shield counts as the left hand. A weapon for both hands is only named for the right hand
+Function AddHandsToState(int stateHandle, Actor companion)
+    Form rightHand = companion.GetEquippedObject(HandRight)
+    Form leftHand = companion.GetEquippedObject(HandLeft)
+    If !leftHand
+        leftHand = companion.GetEquippedShield()
+    EndIf
+    string[] hands = new string[2]
+    hands[0] = "R:"
+    hands[1] = "L:"
+    If rightHand
+        hands[0] = "R:" + rightHand.GetName()
+    EndIf
+    If leftHand && leftHand != rightHand
+        hands[1] = "L:" + leftHand.GetName()
+    EndIf
+    SKSE_HTTP.setStringArray(stateHandle, "hands", hands)
+EndFunction
+
+; The inventory of the player or of the companion as two lists under keyName and keyName + "_names".
+; Numbers: first how many kinds of items there are in all (more than MaxInventoryItems are cut off), then per item
+; form ID, how many, form type, worn or held (1 or 0). An item without a name (the game hides those) stays all 0.
+; Names: one text per item, its place in the list of numbers (from 0), a colon and the name
+Function AddInventoryToState(int stateHandle, Actor owner, string keyName)
+    int totalCount = owner.GetNumItems()
+    int itemCount = totalCount
+    If itemCount > MaxInventoryItems
+        itemCount = MaxInventoryItems
+    EndIf
+    int[] itemValues = Utility.CreateIntArray(1 + itemCount * ValuesPerItem)
+    itemValues[0] = totalCount
+    If itemCount == 0
+        SKSE_HTTP.setIntArray(stateHandle, keyName, itemValues)
+        Return
+    EndIf
+
+    string[] itemNames = Utility.CreateStringArray(itemCount)
+    int index = 0
+    While index < itemCount
+        Form item = owner.GetNthForm(index)
+        If item
+            string itemName = item.GetName()
+            If itemName != ""
+                int start = 1 + index * ValuesPerItem
+                int itemType = item.GetType()
+                itemValues[start] = item.GetFormID()
+                itemValues[start + 1] = owner.GetItemCount(item)
+                itemValues[start + 2] = itemType
+                If itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight
+                    itemValues[start + 3] = ToNumber(owner.IsEquipped(item))
+                EndIf
+                itemNames[index] = (index as string) + ":" + itemName
+            EndIf
+        EndIf
+        index += 1
+    EndWhile
+    SKSE_HTTP.setIntArray(stateHandle, keyName, itemValues)
+    SKSE_HTTP.setStringArray(stateHandle, keyName + "_names", itemNames)
 EndFunction
 
 ; ------------------------------------------------------------------- nearby
@@ -419,6 +545,8 @@ int[] Function RunCommands(int[] commandHandles)
     While index < commandHandles.Length
         If SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_ACTION, "") != ACTION_REPORT_STATE
             resultCount += 1
+        Else
+            _wantedInventory = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_DETAIL, "")
         EndIf
         index += 1
     EndWhile
@@ -448,11 +576,19 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee and move_to."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
+    ElseIf IsItemAction(actionName)
+        ; What the companion does with its things changes nothing about where it walks or whom it fights
+        Form item = GetTargetForm(commandHandle)
+        resultText = GetItemProblem(companion, item, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), actionName)
+        If resultText == ""
+            isOk = true
+            resultText = DoItemCommand(companion, actionName, item, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1))
+        EndIf
     Else
         Actor target = None
         If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO
@@ -481,7 +617,11 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    Return actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO
+    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO
+EndFunction
+
+bool Function IsItemAction(string actionName)
+    Return actionName == ACTION_EQUIP || actionName == ACTION_UNEQUIP || actionName == ACTION_GIVE || actionName == ACTION_TAKE
 EndFunction
 
 ; Does what the command says and returns the text for the AI. Only call this after the command was checked
@@ -524,14 +664,80 @@ EndFunction
 ; The server sends the ref_id of the target as a number as well, because Papyrus cannot read hex text.
 ; It comes in two halves of 16 bits, so that both are small positive numbers
 Actor Function GetTargetActor(int commandHandle)
+    Return GetTargetForm(commandHandle) as Actor
+EndFunction
+
+; The same for any target: a character (ref_id) or an item (its ID from the inventory)
+Form Function GetTargetForm(int commandHandle)
     int highHalf = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_HIGH, 0)
     int lowHalf = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_LOW, 0)
     int formId = Math.LogicalOr(Math.LeftShift(highHalf, 16), lowHalf)
     If formId == 0
         Return None
     EndIf
-    ; GetFormEx also finds characters the game created while running (their IDs start with FF)
-    Return Game.GetFormEx(formId) as Actor
+    ; GetFormEx also finds what the game created while running (those IDs start with FF)
+    Return Game.GetFormEx(formId)
+EndFunction
+
+; ---------------------------------------------------------------------- items
+; equip, unequip, give and take. The target is the ID of an item as the inventory in the state lists it
+
+; Returns why the companion cannot do this with the item, or "" if it can
+string Function GetItemProblem(Actor companion, Form item, string targetText, string actionName)
+    If !item
+        Return "There is no item with the ID '" + targetText + "'. Take the ID from the inventory in STATE."
+    EndIf
+    If item as ObjectReference
+        Return "'" + targetText + "' is a character or a thing in the world, not an item. Take the ID from the inventory in STATE."
+    EndIf
+    If actionName == ACTION_TAKE
+        If Game.GetPlayer().GetItemCount(item) <= 0
+            Return "The player has no " + item.GetName() + "."
+        EndIf
+        Return ""
+    EndIf
+    If companion.GetItemCount(item) <= 0
+        Return "You have no " + item.GetName() + "."
+    EndIf
+    If actionName == ACTION_UNEQUIP && !companion.IsEquipped(item)
+        Return "You are not wearing or holding " + item.GetName() + "."
+    EndIf
+    Return ""
+EndFunction
+
+; Does what the command says and returns the text for the AI. Only call this after GetItemProblem found nothing.
+; wantedCount is for give and take: how many, 0 = all
+string Function DoItemCommand(Actor companion, string actionName, Form item, int wantedCount)
+    string itemName = item.GetName()
+    If actionName == ACTION_EQUIP
+        ; The last "true" keeps the game from showing a message. Equipping a potion or food means using it up
+        companion.EquipItem(item, false, true)
+        If item.GetType() == FormTypePotion
+            Return "You use " + itemName + "."
+        EndIf
+        Return "You equip " + itemName + "."
+    EndIf
+    If actionName == ACTION_UNEQUIP
+        companion.UnequipItem(item, false, true)
+        Return "You put " + itemName + " away."
+    EndIf
+
+    Actor player = Game.GetPlayer()
+    Actor giver = companion
+    Actor receiver = player
+    If actionName == ACTION_TAKE
+        giver = player
+        receiver = companion
+    EndIf
+    int count = giver.GetItemCount(item)
+    If wantedCount > 0 && wantedCount < count
+        count = wantedCount
+    EndIf
+    giver.RemoveItem(item, count, true, receiver)
+    If actionName == ACTION_TAKE
+        Return "You take " + count + " " + itemName + " from the player."
+    EndIf
+    Return "You give " + count + " " + itemName + " to the player."
 EndFunction
 
 ; Returns why the companion cannot attack the target (isAttack) or walk to it, or "" if it can
