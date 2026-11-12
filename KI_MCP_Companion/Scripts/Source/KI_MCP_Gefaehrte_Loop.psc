@@ -28,6 +28,10 @@ float Property WalkSpeed = 1.0 AutoReadOnly
 ; The value "Confidence" decides whether a character fights or runs. 0 is "cowardly": never fights, always runs from enemies
 float Property ConfidenceCowardly = 0.0 AutoReadOnly
 float Property MinutesPerDay = 1440.0 AutoReadOnly
+; Name under which the SKSE plugin of this mod (KI_MCP_Gefaehrte.dll) registers with SKSE. It reads what scripts cannot get at
+string Property NativePluginName = "KI_MCP_Gefaehrte" AutoReadOnly
+; At most this many open quests go to the server
+int Property MaxQuests = 25 AutoReadOnly
 ; Own event that starts the walk of move_to. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
@@ -72,6 +76,8 @@ int _walkNumber = 0
 ; Who is retreating at the moment because of flee (None = nobody), and how brave that character was before
 Actor _fleeingActor
 float _confidenceBeforeFlee = 0.0
+; Interface version of the SKSE plugin of this mod (0 = the DLL is not loaded, so its functions must not be called)
+int _nativeVersion = 0
 
 ; --------------------------------------------------------------------- events
 
@@ -91,6 +97,10 @@ Function StartLoop()
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk
     StopFleeing()
     EndWalk()
+    _nativeVersion = 0
+    If SKSE.GetPluginVersion(NativePluginName) != -1
+        _nativeVersion = KI_MCP_Gefaehrte_Native.GetInterfaceVersion()
+    EndIf
     _isContactShown = false
     _pollId = Utility.RandomInt(1, 1000000)
     int[] noResults
@@ -163,7 +173,7 @@ EndFunction
 
 ; ---------------------------------------------------------------------- state
 ; Every call into SKSE_HTTP and every question to the game makes this script wait for the next frame.
-; So the state goes to the server in few big pieces: three texts and a few lists of plain numbers,
+; So the state goes to the server in few big pieces: a few texts and a few lists of plain numbers,
 ; instead of one named entry per value. The server gives the numbers their names back
 ; (src/companion/game_state.py in the Mantella fork). The order of the numbers has to match that file
 
@@ -195,8 +205,9 @@ int Function BuildState()
     playerValues[6] = ToNumber(isInterior)
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
-    ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow) and the time of day in minutes since midnight
-    int[] worldValues = new int[2]
+    ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
+    ; and the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state)
+    int[] worldValues = new int[3]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -205,7 +216,17 @@ int Function BuildState()
     ; The game counts time in days since the start of the game. What stands behind the point is the time of day
     float gameDays = Utility.GetCurrentGameTime()
     worldValues[1] = ((gameDays - (gameDays as int)) * MinutesPerDay) as int
+    worldValues[2] = _nativeVersion
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
+
+    ; The open quests of the journal with the texts of their objectives, one text per quest
+    ; (see KI_MCP_Gefaehrte_Native.psc). No "quests" entry means: no open quests, or the SKSE plugin is not loaded
+    If _nativeVersion > 0
+        string[] questLines = KI_MCP_Gefaehrte_Native.GetOpenQuests(MaxQuests)
+        If questLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "quests", questLines)
+        EndIf
+    EndIf
 
     ; No "companion" entry means: the player has no follower at the moment
     Actor companion = GetCompanion()

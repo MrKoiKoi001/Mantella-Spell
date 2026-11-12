@@ -6,6 +6,8 @@
 What it needs on this PC:
 - The Creation Kit from Steam (for PapyrusCompiler.exe and the script sources of the game)
 - SKSE with its script sources in <game>\\Data\\Scripts\\Source
+- For the quests: KI_MCP_Gefaehrte.dll in .\\SKSE\\Plugins. It is built on GitHub from the plugin repository
+  (the fork of mantella-vanilla-dialogue). Without it everything else still works
 - Spriggit, which turns the text files in Spriggit_data into the .esp. It is downloaded once into .\\tools
 
 Everything that is printed also goes to build\\build_log.txt.
@@ -22,7 +24,9 @@ import zipfile
 from typing import List, Optional
 
 PLUGIN_NAME = "KI_MCP_Gefaehrte.esp"
-OWN_SCRIPTS = ["KI_MCP_Gefaehrte_Loop", "KI_MCP_Gefaehrte_PlayerAlias"]
+OWN_SCRIPTS = ["KI_MCP_Gefaehrte_Loop", "KI_MCP_Gefaehrte_PlayerAlias", "KI_MCP_Gefaehrte_Native"]
+# The SKSE plugin of this mod. It reads what scripts cannot get at (the open quests)
+NATIVE_PLUGIN = "KI_MCP_Gefaehrte.dll"
 # The DLL calls functions of this script to raise its events, so the game needs the compiled script as well
 HTTP_SCRIPT = "SKSE_HTTP"
 HTTP_PLUGIN = "SKSE_HTTP.dll"
@@ -40,6 +44,7 @@ SPRIGGIT_EXE = "Spriggit.CLI.exe"
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_FOLDER = os.path.dirname(HERE)
 OWN_SOURCE_FOLDER = os.path.join(HERE, "Scripts", "Source")
+OWN_PLUGINS_FOLDER = os.path.join(HERE, "SKSE", "Plugins")
 MANTELLA_SOURCE_FOLDER = os.path.join(REPO_FOLDER, "Scripts", "Source")
 SPRIGGIT_DATA_FOLDER = os.path.join(HERE, "Spriggit_data")
 BUILD_FOLDER = os.path.join(HERE, "build")
@@ -281,6 +286,12 @@ def install(game_folder: str, plugins_file: str, compiled_files: List[str], plug
     for compiled_file in compiled_files:
         copy_file(compiled_file, os.path.join(data_folder, "Scripts"))
     copy_file(os.path.join(REPO_FOLDER, "SKSE", "Plugins", HTTP_PLUGIN), skse_plugins_folder)
+    native_plugin = os.path.join(OWN_PLUGINS_FOLDER, NATIVE_PLUGIN)
+    if os.path.isfile(native_plugin):
+        copy_file(native_plugin, skse_plugins_folder)
+    else:
+        say("NOTE: " + native_plugin + " is missing. The mod works without it, but the AI does not get the quests. "
+            "Download the DLL from the last successful build of the plugin repository on GitHub (Actions, Artifacts) and put it there.")
     check_address_library(game_folder, skse_plugins_folder)
     activate_plugin(plugins_file)
     if len(glob.glob(os.path.join(game_folder, "skse*_loader.exe"))) == 0:
