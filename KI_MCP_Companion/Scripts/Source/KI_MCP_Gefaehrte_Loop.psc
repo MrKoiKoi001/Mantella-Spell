@@ -10,6 +10,11 @@ int Property ServerPort = 4998 AutoReadOnly
 float Property ErrorPauseSeconds = 1.0 AutoReadOnly
 ; The server holds a request for 25 seconds. If nothing at all came back after this time, ask again
 float Property WatchdogSeconds = 40.0 AutoReadOnly
+; The quest of the game itself that keeps track of the player's follower (DialogueFollower in Skyrim.esm)
+int Property FollowerQuestFormId = 0x000750BA AutoReadOnly
+string Property FollowerQuestFile = "Skyrim.esm" AutoReadOnly
+; Distances go to the server in meters. One meter is about 70 game units
+float Property GameUnitsPerMeter = 70.0 AutoReadOnly
 
 ; ------------------------------------------------------------------- protocol
 ; These strings have to match src/companion/companion_constants.py in the Mantella fork
@@ -26,6 +31,8 @@ string Property KEY_COMMANDS = "companion_commands" AutoReadOnly
 string Property KEY_COMMAND_ID = "companion_command_id" AutoReadOnly
 string Property KEY_COMMAND_ACTION = "companion_action" AutoReadOnly
 string Property ACTION_REPORT_STATE = "report_state" AutoReadOnly
+string Property ACTION_FOLLOW = "follow" AutoReadOnly
+string Property ACTION_WAIT = "wait" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -121,7 +128,30 @@ int Function BuildState()
     SKSE_HTTP.setInt(playerHandle, "health_percent", GetHealthPercent(player))
     SKSE_HTTP.setNestedDictionary(stateHandle, "player", playerHandle)
 
+    ; No "companion" entry means: the player has no follower at the moment
+    Actor companion = GetCompanion()
+    If companion
+        SKSE_HTTP.setNestedDictionary(stateHandle, "companion", BuildCompanionState(companion, player))
+    EndIf
+
     Return stateHandle
+EndFunction
+
+int Function BuildCompanionState(Actor companion, Actor player)
+    int companionHandle = SKSE_HTTP.createDictionary()
+    SetStringSafely(companionHandle, "name", companion.GetDisplayName())
+    SKSE_HTTP.setString(companionHandle, "ref_id", FormIdToHex(companion.GetFormID()))
+    SKSE_HTTP.setInt(companionHandle, "health_percent", GetHealthPercent(companion))
+    SKSE_HTTP.setBool(companionHandle, "dead", companion.IsDead())
+    SKSE_HTTP.setBool(companionHandle, "in_combat", companion.IsInCombat())
+    SKSE_HTTP.setBool(companionHandle, "waiting", IsWaiting(companion))
+    ; Far away (eg left behind in another place) the game has no position worth measuring
+    bool isNearby = companion.Is3DLoaded()
+    SKSE_HTTP.setBool(companionHandle, "nearby", isNearby)
+    If isNearby
+        SKSE_HTTP.setInt(companionHandle, "distance_meters", Math.Floor(companion.GetDistance(player) / GameUnitsPerMeter + 0.5))
+    EndIf
+    Return companionHandle
 EndFunction
 
 ; ------------------------------------------------------------------- commands
@@ -158,12 +188,65 @@ int[] Function RunCommands(int[] commandHandles)
 EndFunction
 
 int Function RunCommand(int commandHandle, string actionName)
-    ; Round one: the mod only reports the state. The actions follow in the next rounds
+    bool isOk = false
+    string resultText = ""
+    If actionName == ACTION_FOLLOW || actionName == ACTION_WAIT
+        Actor companion = GetCompanion()
+        If !companion
+            resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
+        ElseIf companion.IsDead()
+            resultText = "Your character is dead."
+        ElseIf actionName == ACTION_FOLLOW
+            SetWaiting(companion, false)
+            isOk = true
+            resultText = "You follow the player now."
+        Else
+            SetWaiting(companion, true)
+            isOk = true
+            resultText = "You wait here now."
+        EndIf
+    Else
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow and wait."
+    EndIf
+
     int resultHandle = SKSE_HTTP.createDictionary()
     SKSE_HTTP.setString(resultHandle, KEY_COMMAND_ID, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_ID, ""))
-    SKSE_HTTP.setBool(resultHandle, KEY_RESULT_OK, false)
-    SKSE_HTTP.setString(resultHandle, KEY_RESULT_MESSAGE, "The game mod cannot do '" + actionName + "' yet. So far it only reports the state.")
+    SKSE_HTTP.setBool(resultHandle, KEY_RESULT_OK, isOk)
+    SKSE_HTTP.setString(resultHandle, KEY_RESULT_MESSAGE, resultText)
     Return resultHandle
+EndFunction
+
+; ------------------------------------------------------------------ companion
+; The AI plays whoever is the player's follower at the moment. The game keeps that follower in the
+; "Follower" alias of its own quest DialogueFollower, so no reference ID has to be known here
+
+DialogueFollowerScript Function GetFollowerQuest()
+    Return Game.GetFormFromFile(FollowerQuestFormId, FollowerQuestFile) as DialogueFollowerScript
+EndFunction
+
+Actor Function GetCompanion()
+    DialogueFollowerScript followerQuest = GetFollowerQuest()
+    If !followerQuest || !followerQuest.pFollowerAlias
+        Return None
+    EndIf
+    Return followerQuest.pFollowerAlias.GetActorReference()
+EndFunction
+
+bool Function IsWaiting(Actor companion)
+    Return companion.GetActorValue("WaitingForPlayer") > 0.0
+EndFunction
+
+; Same as choosing "Wait here" or "Follow me" in the follower's dialogue.
+; Only call this for the actor returned by GetCompanion()
+Function SetWaiting(Actor companion, bool shouldWait)
+    DialogueFollowerScript followerQuest = GetFollowerQuest()
+    If shouldWait
+        followerQuest.FollowerWait()
+    Else
+        followerQuest.FollowerFollow()
+    EndIf
+    ; Without this the follower only changes behaviour when the game next rethinks its package
+    companion.EvaluatePackage()
 EndFunction
 
 ; -------------------------------------------------------------------- helpers
