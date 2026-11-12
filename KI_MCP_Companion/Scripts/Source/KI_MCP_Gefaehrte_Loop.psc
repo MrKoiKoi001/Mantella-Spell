@@ -23,6 +23,14 @@ float Property NearbyRadiusMeters = 50.0 AutoReadOnly
 int Property RandomSampleCount = 12 AutoReadOnly
 ; Form type of characters for Cell.GetNumRefs and Cell.GetNthRef (kNPC in SKSE)
 int Property FormTypeNpc = 43 AutoReadOnly
+; How fast the companion walks to a character for move_to: 0.0 = walking pace, 1.0 = running
+float Property WalkSpeed = 1.0 AutoReadOnly
+; The value "Confidence" decides whether a character fights or runs. 0 is "cowardly": never fights, always runs from enemies
+float Property ConfidenceCowardly = 0.0 AutoReadOnly
+float Property MinutesPerDay = 1440.0 AutoReadOnly
+; Own event that starts the walk of move_to. Walking makes a script wait until the character has arrived,
+; and the loop must not wait that long. An event runs next to the loop
+string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
 
 ; ------------------------------------------------------------------- protocol
 ; These strings have to match src/companion/companion_constants.py in the Mantella fork
@@ -47,6 +55,8 @@ string Property ACTION_FOLLOW = "follow" AutoReadOnly
 string Property ACTION_WAIT = "wait" AutoReadOnly
 string Property ACTION_ATTACK = "attack" AutoReadOnly
 string Property ACTION_STAND_DOWN = "stand_down" AutoReadOnly
+string Property ACTION_FLEE = "flee" AutoReadOnly
+string Property ACTION_MOVE_TO = "move_to" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -55,6 +65,13 @@ int _pollId = 0
 bool _isContactShown = false
 ; The follower quest of the game, looked up once
 DialogueFollowerScript _followerQuest
+; Whom the companion is walking to at the moment because of move_to (None = nobody)
+Actor _walkTarget
+; Goes up with every command. A walk that was started under an older number has been replaced and stays silent
+int _walkNumber = 0
+; Who is retreating at the moment because of flee (None = nobody), and how brave that character was before
+Actor _fleeingActor
+float _confidenceBeforeFlee = 0.0
 
 ; --------------------------------------------------------------------- events
 
@@ -70,6 +87,10 @@ EndFunction
 Function StartLoop()
     RegisterForModEvent("SKSE_HTTP_OnHttpReplyReceived", "OnHttpReplyReceived")
     RegisterForModEvent("SKSE_HTTP_OnHttpErrorReceived", "OnHttpErrorReceived")
+    RegisterForModEvent(EVENT_WALK, "OnWalkRequested")
+    ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk
+    StopFleeing()
+    EndWalk()
     _isContactShown = false
     _pollId = Utility.RandomInt(1, 1000000)
     int[] noResults
@@ -174,6 +195,18 @@ int Function BuildState()
     playerValues[6] = ToNumber(isInterior)
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
+    ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow) and the time of day in minutes since midnight
+    int[] worldValues = new int[2]
+    worldValues[0] = -1
+    Weather currentWeather = Weather.GetCurrentWeather()
+    If currentWeather
+        worldValues[0] = currentWeather.GetClassification()
+    EndIf
+    ; The game counts time in days since the start of the game. What stands behind the point is the time of day
+    float gameDays = Utility.GetCurrentGameTime()
+    worldValues[1] = ((gameDays - (gameDays as int)) * MinutesPerDay) as int
+    SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
+
     ; No "companion" entry means: the player has no follower at the moment
     Actor companion = GetCompanion()
     Actor companionTarget = None
@@ -198,9 +231,10 @@ EndFunction
 
 ; Ref ID, health in percent, dead, in combat, waiting, in the loaded area, distance to the player in meters,
 ; angle from where the player faces to the companion in degrees (negative = left, positive = right),
-; ref ID of whom the companion fights (0 = nobody)
+; ref ID of whom the companion fights (0 = nobody), direction the companion faces in degrees (0 = north, 90 = east),
+; retreating because of flee, ref ID of whom the companion is walking to because of move_to (0 = nobody)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[9]
+    int[] companionValues = new int[12]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -211,9 +245,14 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[5] = 1
         companionValues[6] = ToMeters(companion.GetDistance(player))
         companionValues[7] = player.GetHeadingAngle(companion) as int
+        companionValues[9] = companion.GetAngleZ() as int
     EndIf
     If companionTarget
         companionValues[8] = companionTarget.GetFormID()
+    EndIf
+    companionValues[10] = ToNumber(_fleeingActor == companion)
+    If _walkTarget
+        companionValues[11] = _walkTarget.GetFormID()
     EndIf
     Return companionValues
 EndFunction
@@ -366,36 +405,26 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
-    If actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_ATTACK && actionName != ACTION_STAND_DOWN
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack and stand_down."
+    If !IsKnownAction(actionName)
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee and move_to."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
-    ElseIf actionName == ACTION_FOLLOW
-        SetWaiting(companion, false)
-        isOk = true
-        resultText = "You follow the player now."
-    ElseIf actionName == ACTION_WAIT
-        SetWaiting(companion, true)
-        isOk = true
-        resultText = "You wait here now."
-    ElseIf actionName == ACTION_ATTACK
-        Actor target = GetTargetActor(commandHandle)
-        resultText = GetAttackProblem(companion, target, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""))
-        If resultText == ""
-            companion.StartCombat(target)
-            isOk = true
-            resultText = "You attack " + target.GetDisplayName() + " now."
-        EndIf
     Else
-        ; stand_down
-        isOk = true
-        If companion.IsInCombat()
-            companion.StopCombat()
-            resultText = "You stop fighting. Whoever keeps attacking you or the player will pull you back into the fight."
-        Else
-            resultText = "You were not fighting."
+        Actor target = None
+        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO
+            target = GetTargetActor(commandHandle)
+            resultText = GetTargetProblem(companion, target, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), actionName == ACTION_ATTACK)
+        EndIf
+        If resultText == ""
+            isOk = true
+            ; A new command ends what the one before started: the walk of move_to and the retreat of flee
+            EndWalk()
+            If actionName != ACTION_FLEE
+                StopFleeing()
+            EndIf
+            resultText = DoCommand(companion, actionName, target)
         EndIf
     EndIf
 
@@ -407,6 +436,47 @@ int Function RunCommand(int commandHandle, string actionName)
         SKSE_HTTP.setString(resultHandle, KEY_RESULT_MESSAGE, "The game could not send the text of this result.")
     EndIf
     Return resultHandle
+EndFunction
+
+bool Function IsKnownAction(string actionName)
+    Return actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO
+EndFunction
+
+; Does what the command says and returns the text for the AI. Only call this after the command was checked
+string Function DoCommand(Actor companion, string actionName, Actor target)
+    If actionName == ACTION_FOLLOW
+        SetWaiting(companion, false)
+        Return "You follow the player now."
+    EndIf
+    If actionName == ACTION_WAIT
+        SetWaiting(companion, true)
+        Return "You wait here now."
+    EndIf
+    If actionName == ACTION_ATTACK
+        companion.StartCombat(target)
+        Return "You attack " + target.GetDisplayName() + " now."
+    EndIf
+    If actionName == ACTION_MOVE_TO
+        ; Waiting comes first. A companion that follows would turn around to the player as soon as it has arrived
+        SetWaiting(companion, true)
+        _walkTarget = target
+        SendModEvent(EVENT_WALK, "", _walkNumber as float)
+        Return "You walk to " + target.GetDisplayName() + " and wait there. 'follow' brings you back to the player."
+    EndIf
+    If actionName == ACTION_FLEE
+        StartFleeing(companion)
+        ; The game decides between fighting and running when a fight starts, so the running fight is ended
+        If companion.IsInCombat()
+            companion.StopCombat()
+        EndIf
+        Return "You retreat: you do not fight and you run from enemies. This holds until your next command."
+    EndIf
+    ; stand_down
+    If companion.IsInCombat()
+        companion.StopCombat()
+        Return "You stop fighting. Whoever keeps attacking you or the player will pull you back into the fight."
+    EndIf
+    Return "You were not fighting."
 EndFunction
 
 ; The server sends the ref_id of the target as a number as well, because Papyrus cannot read hex text.
@@ -422,24 +492,74 @@ Actor Function GetTargetActor(int commandHandle)
     Return Game.GetFormEx(formId) as Actor
 EndFunction
 
-; Returns why the companion cannot attack the target, or "" if it can
-string Function GetAttackProblem(Actor companion, Actor target, string targetText)
+; Returns why the companion cannot attack the target (isAttack) or walk to it, or "" if it can
+string Function GetTargetProblem(Actor companion, Actor target, string targetText, bool isAttack)
     If !target
         Return "There is no character with the ref_id '" + targetText + "'. Take the ref_id from 'nearby' in STATE."
     EndIf
     If target == companion
-        Return "That is you. You cannot attack yourself."
+        Return "That is you yourself."
     EndIf
-    If target == Game.GetPlayer()
+    If isAttack && target == Game.GetPlayer()
         Return "That is the player. You do not attack the player."
     EndIf
     If !target.Is3DLoaded()
         Return target.GetDisplayName() + " is too far away."
     EndIf
-    If target.IsDead()
+    If isAttack && target.IsDead()
         Return target.GetDisplayName() + " is already dead."
     EndIf
     Return ""
+EndFunction
+
+; ----------------------------------------------------------------------- walk
+; move_to: the companion walks to a character and waits there
+
+; Raised by DoCommand. numArg is the number of the command that asked for the walk
+Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownWalkNumber = numArg as int
+    Actor companion = GetCompanion()
+    Actor walkTarget = _walkTarget
+    If ownWalkNumber != _walkNumber || !companion || !walkTarget
+        Return
+    EndIf
+    ; This call only comes back when the companion has arrived, found no way or was sent somewhere else
+    bool hasArrived = companion.PathToReference(walkTarget, WalkSpeed)
+    If ownWalkNumber != _walkNumber
+        ; A newer command has taken over in the meantime
+        Return
+    EndIf
+    _walkTarget = None
+    If !hasArrived
+        Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
+    EndIf
+EndEvent
+
+; A walk that is still running finds a new number when it comes back and then stays silent
+Function EndWalk()
+    _walkNumber += 1
+    _walkTarget = None
+EndFunction
+
+; ----------------------------------------------------------------------- flee
+; flee: the companion becomes cowardly, which is how the game makes a character keep out of fights and run from enemies
+
+Function StartFleeing(Actor companion)
+    If _fleeingActor == companion
+        Return
+    EndIf
+    StopFleeing()
+    _fleeingActor = companion
+    _confidenceBeforeFlee = companion.GetBaseActorValue("Confidence")
+    companion.SetActorValue("Confidence", ConfidenceCowardly)
+EndFunction
+
+; Gives whoever was retreating the old courage back
+Function StopFleeing()
+    If _fleeingActor
+        _fleeingActor.SetActorValue("Confidence", _confidenceBeforeFlee)
+        _fleeingActor = None
+    EndIf
 EndFunction
 
 ; ------------------------------------------------------------------ companion
