@@ -161,12 +161,15 @@ int Function BuildState()
 
     ; Health in percent, in combat, position x, y and z in game units,
     ; direction the player faces in degrees (0 = north, 90 = east), indoors
+    float playerX = player.GetPositionX()
+    float playerY = player.GetPositionY()
+    float playerZ = player.GetPositionZ()
     int[] playerValues = new int[7]
     playerValues[0] = GetHealthPercent(player)
     playerValues[1] = ToNumber(player.IsInCombat())
-    playerValues[2] = player.GetPositionX() as int
-    playerValues[3] = player.GetPositionY() as int
-    playerValues[4] = player.GetPositionZ() as int
+    playerValues[2] = playerX as int
+    playerValues[3] = playerY as int
+    playerValues[4] = playerZ as int
     playerValues[5] = player.GetAngleZ() as int
     playerValues[6] = ToNumber(isInterior)
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
@@ -181,7 +184,7 @@ int Function BuildState()
     EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
-    AddNearbyToState(stateHandle, player, playerCell, isInterior, companion, companionTarget)
+    AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget)
 
     ; How long collecting took in milliseconds: all of it, and the characters nearby alone.
     ; The AI has to wait this long for every state, so these numbers show where time is lost
@@ -220,7 +223,7 @@ EndFunction
 ; If there are more than fit into the list, the closest ones win. The server sorts the list by distance.
 ; If nobody is around, the state gets no "nearby" entries at all
 
-Function AddNearbyToState(int stateHandle, Actor player, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget)
+Function AddNearbyToState(int stateHandle, Actor player, float playerX, float playerY, float playerZ, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget)
     ; The length of these two arrays is the highest number of characters that get listed.
     ; Papyrus only takes a plain number as the length of a new array
     Actor[] found = new Actor[10]
@@ -243,9 +246,6 @@ Function AddNearbyToState(int stateHandle, Actor player, Cell playerCell, bool i
         EndWhile
 
         If !isInterior
-            float playerX = player.GetPositionX()
-            float playerY = player.GetPositionY()
-            float playerZ = player.GetPositionZ()
             int sampleIndex = 0
             While sampleIndex < RandomSampleCount
                 foundCount = AddNearbyActor(found, distances, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
