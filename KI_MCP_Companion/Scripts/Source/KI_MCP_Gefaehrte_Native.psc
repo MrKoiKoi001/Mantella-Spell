@@ -11,3 +11,14 @@ int Function GetInterfaceVersion() global native
 ; tracked (1 or 0), type of the quest as the game numbers it (6 = miscellaneous), name of the quest,
 ; then the text of each objective that is shown and not done
 string[] Function GetOpenQuests(int maxQuests) global native
+
+; The two functions below exist from interface version 2 on
+
+; Whether the plugin could hook into the subtitles of the game. If not, there is nothing to fetch
+bool Function IsHearing() global native
+
+; What the characters around the player said since the last call (the subtitles of the game), oldest first,
+; at most maxLines (then the newest ones). One text per line, its parts separated by tabs:
+; how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker, what was said.
+; A line the player picked in a dialogue menu has the player as its speaker
+string[] Function TakeHeardLines(int maxLines) global native

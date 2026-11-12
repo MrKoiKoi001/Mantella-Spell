@@ -32,6 +32,10 @@ float Property MinutesPerDay = 1440.0 AutoReadOnly
 string Property NativePluginName = "KI_MCP_Gefaehrte" AutoReadOnly
 ; At most this many open quests go to the server
 int Property MaxQuests = 25 AutoReadOnly
+; From this interface version on the SKSE plugin can listen to what characters say
+int Property NativeVersionWithHearing = 2 AutoReadOnly
+; At most this many lines that were heard go to the server with one state
+int Property MaxHeardLines = 20 AutoReadOnly
 ; Own event that starts the walk of move_to. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
@@ -78,6 +82,8 @@ Actor _fleeingActor
 float _confidenceBeforeFlee = 0.0
 ; Interface version of the SKSE plugin of this mod (0 = the DLL is not loaded, so its functions must not be called)
 int _nativeVersion = 0
+; Whether the SKSE plugin listens to what characters say (it could hook into the subtitles of the game)
+bool _isHearing = false
 
 ; --------------------------------------------------------------------- events
 
@@ -98,8 +104,12 @@ Function StartLoop()
     StopFleeing()
     EndWalk()
     _nativeVersion = 0
+    _isHearing = false
     If SKSE.GetPluginVersion(NativePluginName) != -1
         _nativeVersion = KI_MCP_Gefaehrte_Native.GetInterfaceVersion()
+        If _nativeVersion >= NativeVersionWithHearing
+            _isHearing = KI_MCP_Gefaehrte_Native.IsHearing()
+        EndIf
     EndIf
     _isContactShown = false
     _pollId = Utility.RandomInt(1, 1000000)
@@ -206,8 +216,9 @@ int Function BuildState()
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
-    ; and the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state)
-    int[] worldValues = new int[3]
+    ; the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state),
+    ; and whether that plugin listens to what characters say
+    int[] worldValues = new int[4]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -217,6 +228,7 @@ int Function BuildState()
     float gameDays = Utility.GetCurrentGameTime()
     worldValues[1] = ((gameDays - (gameDays as int)) * MinutesPerDay) as int
     worldValues[2] = _nativeVersion
+    worldValues[3] = ToNumber(_isHearing)
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
 
     ; The open quests of the journal with the texts of their objectives, one text per quest
@@ -225,6 +237,15 @@ int Function BuildState()
         string[] questLines = KI_MCP_Gefaehrte_Native.GetOpenQuests(MaxQuests)
         If questLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "quests", questLines)
+        EndIf
+    EndIf
+
+    ; What the characters around the player said since the last state, one text per line
+    ; (see KI_MCP_Gefaehrte_Native.psc). The plugin forgets a line once it has handed it out, the server keeps it for the AI
+    If _isHearing
+        string[] heardLines = KI_MCP_Gefaehrte_Native.TakeHeardLines(MaxHeardLines)
+        If heardLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "heard", heardLines)
         EndIf
     EndIf
 
