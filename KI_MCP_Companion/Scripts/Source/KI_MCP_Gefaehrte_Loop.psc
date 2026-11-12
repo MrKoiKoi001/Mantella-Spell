@@ -36,6 +36,14 @@ int Property MaxQuests = 25 AutoReadOnly
 int Property NativeVersionWithHearing = 2 AutoReadOnly
 ; At most this many lines that were heard go to the server with one state
 int Property MaxHeardLines = 20 AutoReadOnly
+; From this interface version on the SKSE plugin knows where quest targets are and which places are around
+int Property NativeVersionWithPlaces = 3 AutoReadOnly
+; At most this many targets of tracked quests go to the server
+int Property MaxQuestTargets = 8 AutoReadOnly
+; Places around the player: how far the plugin looks, and how many map markers and doors go to the server
+int Property PlaceRadiusMeters = 300 AutoReadOnly
+int Property MaxPlaceMarkers = 6 AutoReadOnly
+int Property MaxPlaceDoors = 6 AutoReadOnly
 ; Gold is an item like any other. This is its form ID in Skyrim.esm
 int Property GoldFormId = 0x0000000F AutoReadOnly
 string Property GoldFile = "Skyrim.esm" AutoReadOnly
@@ -288,6 +296,20 @@ int Function BuildState()
         string[] questLines = KI_MCP_Gefaehrte_Native.GetOpenQuests(MaxQuests)
         If questLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "quests", questLines)
+        EndIf
+    EndIf
+
+    ; Where the targets of the tracked quests are, and the places around the player (map markers and doors
+    ; that lead somewhere), one text per target and per place (see KI_MCP_Gefaehrte_Native.psc).
+    ; The targets name their quest by its place in the list above, so both lists are fetched with the same limit
+    If _nativeVersion >= NativeVersionWithPlaces
+        string[] targetLines = KI_MCP_Gefaehrte_Native.GetQuestTargets(MaxQuests, MaxQuestTargets)
+        If targetLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "quest_targets", targetLines)
+        EndIf
+        string[] placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors)
+        If placeLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "places", placeLines)
         EndIf
     EndIf
 

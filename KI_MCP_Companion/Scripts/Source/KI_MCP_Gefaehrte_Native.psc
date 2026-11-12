@@ -22,3 +22,22 @@ bool Function IsHearing() global native
 ; how many seconds ago, ref ID of the speaker as eight hex digits, name of the speaker, what was said.
 ; A line the player picked in a dialogue menu has the player as its speaker
 string[] Function TakeHeardLines(int maxLines) global native
+
+; The two functions below exist from interface version 3 on
+
+; Where the targets of the tracked quests are (what the compass of the game points to), at most maxTargets.
+; One text per target, its parts separated by tabs:
+; place of the quest in the list GetOpenQuests(maxQuests) returns (from 0), place of the objective in that quest (from 0),
+; where the target is (0 = in the area of the player, 1 = behind a door of this area, 2 = somewhere else),
+; distance to the player in meters, angle from where the player faces in degrees (negative = left)
+; - for 1 these are the distance and angle of that door, for 2 both are 0 -,
+; name of the target (can be empty), and for 1 and 2 the name of the place behind the door or of the place the target is in
+string[] Function GetQuestTargets(int maxQuests, int maxTargets) global native
+
+; The places around the player, map markers first, then doors, each nearest first: at most maxMarkers map markers
+; within radiusMeters (none indoors), and at most maxDoors doors in the loaded area within radiusMeters that lead
+; into another area (a building, a cave, out of town). 0 switches that kind off. One text per place, its parts separated by tabs:
+; kind (0 = map marker, 1 = door), distance to the player in meters, angle from where the player faces in degrees
+; (negative = left), for a map marker the kind of place as the game numbers it (13 = farm, 21 = stable ...),
+; for a map marker 1 if the player has been there, name of the place (for a door: of the place it leads to)
+string[] Function GetNearbyPlaces(int radiusMeters, int maxMarkers, int maxDoors) global native
