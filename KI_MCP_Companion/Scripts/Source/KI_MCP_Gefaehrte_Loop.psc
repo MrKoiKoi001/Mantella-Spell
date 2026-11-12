@@ -1,7 +1,8 @@
 Scriptname KI_MCP_Gefaehrte_Loop extends Quest
 {Long polling loop between Skyrim and the companion server (companion_main.py in the Mantella fork).
 The game can only ask and the server can only answer. So this script keeps one request open at all times.
-The server holds it until the AI has a command, and every request carries the current game state.}
+The server holds it until the AI has a command. Collecting the game state takes about a second,
+so a request only carries it when the server asked for it with the command report_state.}
 
 ; ------------------------------------------------------------------- settings
 
@@ -52,6 +53,8 @@ string Property ACTION_STAND_DOWN = "stand_down" AutoReadOnly
 ; Number of the newest request. The server sends it back, so replies to older requests can be told apart
 int _pollId = 0
 bool _isContactShown = false
+; The follower quest of the game, looked up once
+DialogueFollowerScript _followerQuest
 
 ; --------------------------------------------------------------------- events
 
@@ -70,7 +73,8 @@ Function StartLoop()
     _isContactShown = false
     _pollId = Utility.RandomInt(1, 1000000)
     int[] noResults
-    SendPoll(noResults)
+    ; The first request carries the state, so the server has one even before the AI asks for it
+    SendPoll(noResults, true)
 EndFunction
 
 Event OnHttpReplyReceived(int typedDictionaryHandle)
@@ -90,10 +94,14 @@ Event OnHttpReplyReceived(int typedDictionaryHandle)
     EndIf
 
     int[] resultHandles
+    bool isStateWanted = false
     If replyType == REPLY_TYPE_COMMANDS
-        resultHandles = RunCommands(SKSE_HTTP.getNestedDictionariesArray(typedDictionaryHandle, KEY_COMMANDS))
+        int[] commandHandles = SKSE_HTTP.getNestedDictionariesArray(typedDictionaryHandle, KEY_COMMANDS)
+        resultHandles = RunCommands(commandHandles)
+        ; Every command gets a result, except for report_state. So a missing result means: the server wants the state
+        isStateWanted = resultHandles.Length < commandHandles.Length
     EndIf
-    SendPoll(resultHandles)
+    SendPoll(resultHandles, isStateWanted)
 EndEvent
 
 Event OnHttpErrorReceived(int typedDictionaryHandle)
@@ -108,18 +116,22 @@ EndEvent
 Event OnUpdate()
     ; Either the pause after an error is over, or the watchdog hit because no reply came for too long
     int[] noResults
-    SendPoll(noResults)
+    SendPoll(noResults, false)
 EndEvent
 
 ; -------------------------------------------------------------------- request
 
-Function SendPoll(int[] resultHandles)
+; Collecting the state takes about a second, and the results of commands would have to wait for it.
+; So a request only carries the state if isStateWanted is set
+Function SendPoll(int[] resultHandles, bool isStateWanted)
     _pollId += 1
     int ownPollId = _pollId
 
     int requestHandle = SKSE_HTTP.createDictionary()
     SKSE_HTTP.setInt(requestHandle, KEY_POLL_ID, ownPollId)
-    SKSE_HTTP.setNestedDictionary(requestHandle, KEY_STATE, BuildState())
+    If isStateWanted
+        SKSE_HTTP.setNestedDictionary(requestHandle, KEY_STATE, BuildState())
+    EndIf
     If resultHandles.Length > 0
         SKSE_HTTP.setNestedDictionariesArray(requestHandle, KEY_RESULTS, resultHandles)
     EndIf
@@ -128,130 +140,159 @@ Function SendPoll(int[] resultHandles)
     RegisterForSingleUpdate(WatchdogSeconds)
 EndFunction
 
+; ---------------------------------------------------------------------- state
+; Every call into SKSE_HTTP and every question to the game makes this script wait for the next frame.
+; So the state goes to the server in few big pieces: three texts and a few lists of plain numbers,
+; instead of one named entry per value. The server gives the numbers their names back
+; (src/companion/game_state.py in the Mantella fork). The order of the numbers has to match that file
+
 int Function BuildState()
     float startTime = Utility.GetCurrentRealTime()
     Actor player = Game.GetPlayer()
+    Cell playerCell = player.GetParentCell()
+    bool isInterior = false
+    If playerCell
+        isInterior = playerCell.IsInterior()
+    EndIf
 
     int stateHandle = SKSE_HTTP.createDictionary()
     SetStringSafely(stateHandle, "location", GetLocationName(player))
-    SKSE_HTTP.setBool(stateHandle, "in_combat", player.IsInCombat())
+    SetStringSafely(stateHandle, "player_name", player.GetDisplayName())
 
-    int playerHandle = SKSE_HTTP.createDictionary()
-    SetStringSafely(playerHandle, "name", player.GetDisplayName())
-    SKSE_HTTP.setString(playerHandle, "ref_id", FormIdToHex(player.GetFormID()))
-    SKSE_HTTP.setInt(playerHandle, "health_percent", GetHealthPercent(player))
-    SKSE_HTTP.setNestedDictionary(stateHandle, "player", playerHandle)
+    ; Health in percent, in combat, position x, y and z in game units,
+    ; direction the player faces in degrees (0 = north, 90 = east), indoors
+    int[] playerValues = new int[7]
+    playerValues[0] = GetHealthPercent(player)
+    playerValues[1] = ToNumber(player.IsInCombat())
+    playerValues[2] = player.GetPositionX() as int
+    playerValues[3] = player.GetPositionY() as int
+    playerValues[4] = player.GetPositionZ() as int
+    playerValues[5] = player.GetAngleZ() as int
+    playerValues[6] = ToNumber(isInterior)
+    SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; No "companion" entry means: the player has no follower at the moment
     Actor companion = GetCompanion()
     Actor companionTarget = None
     If companion
         companionTarget = companion.GetCombatTarget()
-        SKSE_HTTP.setNestedDictionary(stateHandle, "companion", BuildCompanionState(companion, player, companionTarget))
+        SetStringSafely(stateHandle, "companion_name", companion.GetDisplayName())
+        SKSE_HTTP.setIntArray(stateHandle, "companion", BuildCompanionValues(companion, player, companionTarget))
     EndIf
 
-    ; No "nearby" entry means: nobody is around
-    int[] nearbyHandles = BuildNearbyStates(player, companion, companionTarget)
-    If nearbyHandles.Length > 0
-        SKSE_HTTP.setNestedDictionariesArray(stateHandle, "nearby", nearbyHandles)
-    EndIf
+    float scanStartTime = Utility.GetCurrentRealTime()
+    AddNearbyToState(stateHandle, player, playerCell, isInterior, companion, companionTarget)
 
-    ; How long collecting all of this took. Every request waits for it, so this number shows if the state got too big
-    SKSE_HTTP.setInt(stateHandle, "build_ms", Math.Floor((Utility.GetCurrentRealTime() - startTime) * 1000.0))
+    ; How long collecting took in milliseconds: all of it, and the characters nearby alone.
+    ; The AI has to wait this long for every state, so these numbers show where time is lost
+    float endTime = Utility.GetCurrentRealTime()
+    int[] timeValues = new int[2]
+    timeValues[0] = ((endTime - startTime) * 1000.0) as int
+    timeValues[1] = ((endTime - scanStartTime) * 1000.0) as int
+    SKSE_HTTP.setIntArray(stateHandle, "times_ms", timeValues)
     Return stateHandle
 EndFunction
 
-int Function BuildCompanionState(Actor companion, Actor player, Actor companionTarget)
-    int companionHandle = SKSE_HTTP.createDictionary()
-    SetStringSafely(companionHandle, "name", companion.GetDisplayName())
-    SKSE_HTTP.setString(companionHandle, "ref_id", FormIdToHex(companion.GetFormID()))
-    SKSE_HTTP.setInt(companionHandle, "health_percent", GetHealthPercent(companion))
-    SKSE_HTTP.setBool(companionHandle, "dead", companion.IsDead())
-    SKSE_HTTP.setBool(companionHandle, "in_combat", companion.IsInCombat())
-    SKSE_HTTP.setBool(companionHandle, "waiting", IsWaiting(companion))
+; Ref ID, health in percent, dead, in combat, waiting, in the loaded area, distance to the player in meters,
+; angle from where the player faces to the companion in degrees (negative = left, positive = right),
+; ref ID of whom the companion fights (0 = nobody)
+int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
+    int[] companionValues = new int[9]
+    companionValues[0] = companion.GetFormID()
+    companionValues[1] = GetHealthPercent(companion)
+    companionValues[2] = ToNumber(companion.IsDead())
+    companionValues[3] = ToNumber(companion.IsInCombat())
+    companionValues[4] = ToNumber(IsWaiting(companion))
     ; Far away (eg left behind in another place) the game has no position worth measuring
-    bool isNearby = companion.Is3DLoaded()
-    SKSE_HTTP.setBool(companionHandle, "nearby", isNearby)
-    If isNearby
-        SKSE_HTTP.setInt(companionHandle, "distance_meters", ToMeters(companion.GetDistance(player)))
+    If companion.Is3DLoaded()
+        companionValues[5] = 1
+        companionValues[6] = ToMeters(companion.GetDistance(player))
+        companionValues[7] = player.GetHeadingAngle(companion) as int
     EndIf
-    ; Whom the companion fights at the moment. Missing while it fights nobody
     If companionTarget
-        SKSE_HTTP.setString(companionHandle, "target_ref_id", FormIdToHex(companionTarget.GetFormID()))
+        companionValues[8] = companionTarget.GetFormID()
     EndIf
-    Return companionHandle
+    Return companionValues
 EndFunction
 
 ; ------------------------------------------------------------------- nearby
 ; The living characters around the player, without the player and the companion.
-; If there are more than fit into the list, the closest ones win. The server sorts the list by distance
+; If there are more than fit into the list, the closest ones win. The server sorts the list by distance.
+; If nobody is around, the state gets no "nearby" entries at all
 
-int[] Function BuildNearbyStates(Actor player, Actor companion, Actor companionTarget)
+Function AddNearbyToState(int stateHandle, Actor player, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget)
     ; The length of these two arrays is the highest number of characters that get listed.
     ; Papyrus only takes a plain number as the length of a new array
     Actor[] found = new Actor[10]
     float[] distances = new float[10]
+    ; Characters that were looked at and do not belong into the list. Outdoors the same character
+    ; is drawn several times, and with this list looking at it again costs no question to the game
+    Actor[] rejected = new Actor[20]
     int foundCount = 0
     float radius = NearbyRadiusMeters * GameUnitsPerMeter
 
     ; Whoever the companion fights belongs into the list first
-    foundCount = AddNearbyActor(found, distances, foundCount, companionTarget, player, companion, radius)
+    foundCount = AddNearbyActor(found, distances, rejected, foundCount, companionTarget, player, companion, radius)
 
-    Cell playerCell = player.GetParentCell()
     If playerCell
         int refCount = playerCell.GetNumRefs(FormTypeNpc)
         int refIndex = 0
         While refIndex < refCount
-            foundCount = AddNearbyActor(found, distances, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius)
+            foundCount = AddNearbyActor(found, distances, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius)
             refIndex += 1
         EndWhile
 
-        If !playerCell.IsInterior()
+        If !isInterior
             float playerX = player.GetPositionX()
             float playerY = player.GetPositionY()
             float playerZ = player.GetPositionZ()
             int sampleIndex = 0
             While sampleIndex < RandomSampleCount
-                foundCount = AddNearbyActor(found, distances, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
+                foundCount = AddNearbyActor(found, distances, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
                 sampleIndex += 1
             EndWhile
         EndIf
     EndIf
 
-    int[] nearbyHandles
     If foundCount == 0
-        Return nearbyHandles
+        Return
     EndIf
-    nearbyHandles = Utility.CreateIntArray(foundCount)
+
+    ; Four numbers per character: ref ID, distance to the player in meters,
+    ; angle from where the player faces to the character in degrees (negative = left, positive = right), hostile to the player
+    int[] nearbyValues = Utility.CreateIntArray(foundCount * 4)
+    ; One text per character: its place in the list, a colon and its name, eg "0:Bandit".
+    ; SKSE_HTTP drops every name that is not valid UTF-8 without a word, so the server could not count the places
+    string[] nearbyNames = Utility.CreateStringArray(foundCount)
     int index = 0
     While index < foundCount
         Actor nearbyActor = found[index]
-        int nearbyHandle = SKSE_HTTP.createDictionary()
-        SetStringSafely(nearbyHandle, "name", nearbyActor.GetDisplayName())
-        SKSE_HTTP.setString(nearbyHandle, "ref_id", FormIdToHex(nearbyActor.GetFormID()))
-        SKSE_HTTP.setInt(nearbyHandle, "distance_meters", ToMeters(distances[index]))
-        SKSE_HTTP.setBool(nearbyHandle, "hostile", nearbyActor.IsHostileToActor(player))
-        nearbyHandles[index] = nearbyHandle
+        int valueIndex = index * 4
+        nearbyValues[valueIndex] = nearbyActor.GetFormID()
+        nearbyValues[valueIndex + 1] = ToMeters(distances[index])
+        nearbyValues[valueIndex + 2] = player.GetHeadingAngle(nearbyActor) as int
+        nearbyValues[valueIndex + 3] = ToNumber(nearbyActor.IsHostileToActor(player))
+        nearbyNames[index] = (index as string) + ":" + nearbyActor.GetDisplayName()
         index += 1
     EndWhile
-    Return nearbyHandles
+    SKSE_HTTP.setIntArray(stateHandle, "nearby", nearbyValues)
+    SKSE_HTTP.setStringArray(stateHandle, "nearby_names", nearbyNames)
 EndFunction
 
 ; Puts the candidate into the list if it is a living character in reach that is not listed yet.
 ; Returns the new number of listed characters
-int Function AddNearbyActor(Actor[] found, float[] distances, int foundCount, Actor candidate, Actor player, Actor companion, float radius)
+int Function AddNearbyActor(Actor[] found, float[] distances, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius)
     If !candidate || candidate == player || candidate == companion
         Return foundCount
     EndIf
-    If found.Find(candidate) >= 0
+    If found.Find(candidate) >= 0 || rejected.Find(candidate) >= 0
         Return foundCount
     EndIf
+    ; The distance comes first because most characters that do not belong into the list are too far away.
     ; Disabled characters and characters outside the loaded area have no body in the world
-    If !candidate.Is3DLoaded()
-        Return foundCount
-    EndIf
     float distance = candidate.GetDistance(player)
-    If distance > radius || candidate.IsDead()
+    If distance > radius || candidate.IsDead() || !candidate.Is3DLoaded()
+        RememberRejected(rejected, candidate)
         Return foundCount
     EndIf
 
@@ -271,10 +312,21 @@ int Function AddNearbyActor(Actor[] found, float[] distances, int foundCount, Ac
         index += 1
     EndWhile
     If distance < distances[farthestIndex]
+        RememberRejected(rejected, found[farthestIndex])
         found[farthestIndex] = candidate
         distances[farthestIndex] = distance
+    Else
+        RememberRejected(rejected, candidate)
     EndIf
     Return foundCount
+EndFunction
+
+; If the list of rejected characters is full, the candidate is simply looked at again next time
+Function RememberRejected(Actor[] rejected, Actor candidate)
+    int freeIndex = rejected.Find(None)
+    If freeIndex >= 0
+        rejected[freeIndex] = candidate
+    EndIf
 EndFunction
 
 ; ------------------------------------------------------------------- commands
@@ -395,7 +447,10 @@ EndFunction
 ; "Follower" alias of its own quest DialogueFollower, so no reference ID has to be known here
 
 DialogueFollowerScript Function GetFollowerQuest()
-    Return Game.GetFormFromFile(FollowerQuestFormId, FollowerQuestFile) as DialogueFollowerScript
+    If !_followerQuest
+        _followerQuest = Game.GetFormFromFile(FollowerQuestFormId, FollowerQuestFile) as DialogueFollowerScript
+    EndIf
+    Return _followerQuest
 EndFunction
 
 Actor Function GetCompanion()
@@ -449,12 +504,21 @@ string Function GetLocationName(Actor player)
     Return locationName
 EndFunction
 
+; Rounds to whole meters. The cast cuts off the decimals, which is rounding down for the positive numbers here
 int Function ToMeters(float gameUnits)
-    Return Math.Floor(gameUnits / GameUnitsPerMeter + 0.5)
+    Return (gameUnits / GameUnitsPerMeter + 0.5) as int
 EndFunction
 
 int Function GetHealthPercent(Actor target)
-    Return Math.Floor(target.GetActorValuePercentage("Health") * 100.0 + 0.5)
+    Return (target.GetActorValuePercentage("Health") * 100.0 + 0.5) as int
+EndFunction
+
+; Yes and no travel as 1 and 0 inside the lists of numbers
+int Function ToNumber(bool value)
+    If value
+        Return 1
+    EndIf
+    Return 0
 EndFunction
 
 ; SKSE_HTTP refuses text that is not valid UTF-8 and then stores nothing at all
@@ -462,17 +526,4 @@ Function SetStringSafely(int handle, string keyName, string value)
     If !SKSE_HTTP.setString(handle, keyName, value)
         SKSE_HTTP.setString(handle, keyName, "unreadable")
     EndIf
-EndFunction
-
-; Form IDs go to the server as eight hex digits, eg 00000014 for the player
-string Function FormIdToHex(int formId)
-    string hexDigits = "0123456789ABCDEF"
-    string result = ""
-    int shift = 28
-    While shift >= 0
-        int nibble = Math.LogicalAnd(Math.RightShift(formId, shift), 15)
-        result += StringUtil.Substring(hexDigits, nibble, 1)
-        shift -= 4
-    EndWhile
-    Return result
 EndFunction
