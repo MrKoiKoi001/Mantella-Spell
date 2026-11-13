@@ -65,12 +65,12 @@ string Function GetVoiceTypeName(Actor target) global native
 
 ; The door on the other side of a door that leads into another area (a building, a cave, out of town),
 ; or None if this is no such door
-ObjectReference Function GetDoorDestination(ObjectReference door) global native
+ObjectReference Function GetDoorDestination(ObjectReference doorRef) global native
 
 ; Where someone stands after going through such a door, measured from the door on the other side (GetDoorDestination):
 ; how far to the east, to the north and upwards in game units, and the direction faced in degrees (0 = north, 90 = east).
 ; Empty if this is no such door
-float[] Function GetDoorArrival(ObjectReference door) global native
+float[] Function GetDoorArrival(ObjectReference doorRef) global native
 
 ; The characters in the building the character "origin" is in while the player is somewhere else, nearest first,
 ; at most maxCharacters. The game has not loaded such a building, so these are only the ones it keeps in memory:

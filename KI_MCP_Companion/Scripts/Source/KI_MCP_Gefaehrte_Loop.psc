@@ -76,7 +76,7 @@ int Property FormTypeFurniture = 40 AutoReadOnly
 int Property SitStateSeated = 3 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 4 AutoReadOnly
+int Property ProtocolNumber = 5 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -129,6 +129,9 @@ int Property LeadAliasWalker = 0 AutoReadOnly
 int Property LeadAliasLeader = 1 AutoReadOnly
 ; expression: the looks of the game go from 0 to this number (see Actor.SetExpressionOverride)
 int Property HighestMood = 16 AutoReadOnly
+; visible: what the companion can see lies within this many degrees to the left and right of where it faces.
+; For the player the game itself only counts what is in the view of the camera (see CanSee)
+float Property VisibleHalfAngleDegrees = 60.0 AutoReadOnly
 ; look_at only turns the head, and a head does not turn all the way round. If the target is further to the side
 ; than this many degrees, the body turns as well
 float Property LookTurnDegrees = 70.0 AutoReadOnly
@@ -165,6 +168,8 @@ string Property KEY_COMMAND_THINGS = "companion_things" AutoReadOnly
 string Property KEY_COMMAND_AROUND = "companion_around" AutoReadOnly
 ; For report_state: 1 if the state should carry the level, the skills and so on of the player (see BuildPlayerStats)
 string Property KEY_COMMAND_STATS = "companion_stats" AutoReadOnly
+; For report_state: 1 if the list of characters should only hold those the viewer can see (see CanSee)
+string Property KEY_COMMAND_VISIBLE = "companion_visible" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -255,6 +260,10 @@ bool _wantedThings = false
 bool _wantedAround = false
 ; Whether it asked for the level, the skills and so on of the player. Used up by BuildState
 bool _wantedStats = false
+; Whether it asked only for what the viewer can see. Used up by BuildState
+bool _wantedVisible = false
+; While BuildState collects the characters nearby: whether only those the viewer can see go into the list
+bool _isVisibleOnlyScan = false
 
 ; --------------------------------------------------------------------- events
 
@@ -383,6 +392,8 @@ int Function BuildState()
     _wantedAround = false
     bool areStatsWanted = _wantedStats
     _wantedStats = false
+    bool isVisibleWanted = _wantedVisible
+    _wantedVisible = false
     Actor companion = GetCompanion()
     Actor viewer = player
     bool isRemoteViewer = false
@@ -426,8 +437,11 @@ int Function BuildState()
     ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
     ; the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state),
     ; whether that plugin listens to what characters say, the number of this protocol (see ProtocolNumber),
-    ; and whether the lists of this state are seen from the companion (1) or from the player (0)
-    int[] worldValues = new int[6]
+    ; whether the lists of this state are seen from the companion (1) or from the player (0),
+    ; and whether the list of characters only holds those the viewer can see (1). Inside a building the game has not
+    ; loaded nobody can see anything, so there the list is never filtered
+    bool isVisibleOnly = isVisibleWanted && !isRemoteViewer
+    int[] worldValues = new int[7]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -440,6 +454,7 @@ int Function BuildState()
     worldValues[3] = ToNumber(_isHearing)
     worldValues[4] = ProtocolNumber
     worldValues[5] = ToNumber(viewer != player)
+    worldValues[6] = ToNumber(isVisibleOnly)
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
 
     ; The open quests of the journal with the texts of their objectives, one text per quest
@@ -556,6 +571,7 @@ int Function BuildState()
     EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
+    _isVisibleOnlyScan = isVisibleOnly
     If isRemoteViewer
         ; The characters in a building that is not loaded cannot be asked anything by a script. The plugin lists them:
         ; one text per character (see KI_MCP_Gefaehrte_Native.psc)
@@ -573,6 +589,8 @@ int Function BuildState()
         EndIf
         AddNearbyToState(stateHandle, player, viewer, viewer.GetPositionX(), viewer.GetPositionY(), viewer.GetPositionZ(), viewerCell, isViewerInterior, companion, companionTarget, listLimit)
     EndIf
+
+    _isVisibleOnlyScan = false
 
     ; How long collecting took in milliseconds: all of it, and the characters nearby alone.
     ; The AI has to wait this long for every state, so these numbers show where time is lost
@@ -896,6 +914,11 @@ int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, 
         RememberRejected(rejected, candidate)
         Return foundCount
     EndIf
+    ; STATE with 'visible': only who the viewer can see. That costs one more question per character, so it comes last
+    If _isVisibleOnlyScan && !CanSee(viewer, player, candidate)
+        RememberRejected(rejected, candidate)
+        Return foundCount
+    EndIf
     bool isDead = candidate.IsDead()
 
     If foundCount < listLimit
@@ -937,6 +960,20 @@ int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, 
     Return foundCount
 EndFunction
 
+; Whether the viewer can see the character: it lies in front of the viewer and no wall is in between.
+; For the player the game checks the line of sight only within the view of the camera, so a character the player
+; does not look at counts as not seen. In VR that is where the head looks. For the companion the script itself
+; only counts what lies within VisibleHalfAngleDegrees of where it faces
+bool Function CanSee(Actor viewer, Actor player, Actor candidate)
+    If viewer != player
+        float angle = viewer.GetHeadingAngle(candidate)
+        If angle > VisibleHalfAngleDegrees || angle < -VisibleHalfAngleDegrees
+            Return false
+        EndIf
+    EndIf
+    Return viewer.HasLOS(candidate)
+EndFunction
+
 ; If the list of rejected characters is full, the candidate is simply looked at again next time
 Function RememberRejected(Actor[] rejected, Actor candidate)
     int freeIndex = rejected.Find(None)
@@ -960,6 +997,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedThings = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_THINGS, 0) != 0
             _wantedAround = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_AROUND, 0) != 0
             _wantedStats = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_STATS, 0) != 0
+            _wantedVisible = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_VISIBLE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
@@ -1448,37 +1486,37 @@ EndFunction
 ; A script cannot make a character use a door, so the plugin tells where the door leads and the script puts the companion there
 
 ; Returns why the companion cannot go through the target, or "" if it can
-string Function GetEnterProblem(ObjectReference door)
-    Form baseForm = door.GetBaseObject()
+string Function GetEnterProblem(ObjectReference doorRef)
+    Form baseForm = doorRef.GetBaseObject()
     If !baseForm || baseForm.GetType() != FormTypeDoor
-        Return door.GetDisplayName() + " is not a door. Take the ref_id from 'Doors' in STATE."
+        Return doorRef.GetDisplayName() + " is not a door. Take the ref_id from 'Doors' in STATE."
     EndIf
     If _nativeVersion < NativeVersionWithDoors
         Return "Going through doors needs the newest plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 7)."
     EndIf
-    If door.IsLocked()
+    If doorRef.IsLocked()
         Return "That door is locked."
     EndIf
-    If !KI_MCP_Gefaehrte_Native.GetDoorDestination(door)
+    If !KI_MCP_Gefaehrte_Native.GetDoorDestination(doorRef)
         Return "That door does not lead into another area. Take the ref_id from 'Doors' in STATE."
     EndIf
     Return ""
 EndFunction
 
 ; Sends the companion to the door. Only call this after the command was checked
-string Function StartEntering(Actor companion, ObjectReference door)
+string Function StartEntering(Actor companion, ObjectReference doorRef)
     ; Waiting comes first, as for move_to: the companion is to stay on the other side
     SetWaiting(companion, true)
     _isEnterWalk = true
-    _walkTarget = door
+    _walkTarget = doorRef
     StartWalk()
     Return "You walk to the door and go through it. Your next STATE tells you where you are then. You wait there until 'follow'."
 EndFunction
 
 ; Called when the walk to the door is over: puts the companion where someone stands who has gone through that door
-Function FinishEntering(Actor companion, ObjectReference door)
-    ObjectReference destination = KI_MCP_Gefaehrte_Native.GetDoorDestination(door)
-    float[] arrival = KI_MCP_Gefaehrte_Native.GetDoorArrival(door)
+Function FinishEntering(Actor companion, ObjectReference doorRef)
+    ObjectReference destination = KI_MCP_Gefaehrte_Native.GetDoorDestination(doorRef)
+    float[] arrival = KI_MCP_Gefaehrte_Native.GetDoorArrival(doorRef)
     If !destination || arrival.Length < 4
         AddReport("You could not go through the door: the game does not tell where it leads.")
         Return
@@ -1486,7 +1524,7 @@ Function FinishEntering(Actor companion, ObjectReference door)
     ; The plugin gives the place of arrival as seen from the door on the other side, and the direction faced there
     companion.MoveTo(destination, arrival[0], arrival[1], arrival[2], false)
     companion.SetAngle(0.0, 0.0, arrival[3])
-    _entryDoor = door
+    _entryDoor = doorRef
     string placeName = ""
     Cell destinationCell = destination.GetParentCell()
     If destinationCell
@@ -1503,10 +1541,10 @@ EndFunction
 ; follow: a companion that went through a door on its own comes back out of that door, if the player is still near it.
 ; Otherwise it finds its way like every follower of the game
 Function ReturnThroughDoor(Actor companion)
-    ObjectReference door = _entryDoor
+    ObjectReference doorRef = _entryDoor
     _entryDoor = None
-    If door && !companion.Is3DLoaded() && door.Is3DLoaded()
-        companion.MoveTo(door)
+    If doorRef && !companion.Is3DLoaded() && doorRef.Is3DLoaded()
+        companion.MoveTo(doorRef)
     EndIf
 EndFunction
 
