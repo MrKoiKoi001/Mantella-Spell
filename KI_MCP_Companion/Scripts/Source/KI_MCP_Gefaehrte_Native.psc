@@ -79,3 +79,30 @@ float[] Function GetDoorArrival(ObjectReference doorRef) global native
 ; (negative = left), dead (1 or 0), name. Empty if origin is not in such a place.
 ; In the same situation GetQuestTargets, GetNearbyPlaces and GetNearbyThings also work with what the game keeps in memory
 string[] Function GetCharactersInCell(Actor origin, int maxCharacters) global native
+
+; The five functions below exist from interface version 9 on
+
+; The traps close to the character "origin" (None or far away outdoors = the player), nearest first, at most maxTraps
+; within radiusMeters. One text per trap, built like the lines of GetNearbyThings: kind (always 3), ref ID,
+; distance in meters, angle in degrees (negative = left), 0, and the kind of trap as the game files its model
+; (tripwire, pressureplate, beartrap, macetrap ...). Every part of a trap is a line of its own
+string[] Function GetNearbyTraps(int radiusMeters, int maxTraps, Actor origin) global native
+
+; An arrow that was shot stays in the world as a projectile, which is no item for the game: scripts cannot take it.
+; GetNearbyThings lists such arrows among the items. This tells whether the reference with this ID (in its upper
+; and lower 16 bits, as the server sends IDs) is one: the name of its ammunition, or an empty text
+string Function GetRestingArrowName(int highHalf, int lowHalf) global native
+
+; Gives the taker the ammunition of such an arrow and takes the arrow out of the world. Returns the name of the
+; ammunition, or an empty text if the arrow is not there (any more)
+string Function TakeRestingArrow(Actor taker, int highHalf, int lowHalf) global native
+
+; say: tells what the speaker really says with its next line. The subtitle of the line of this mod then shows that
+; instead of "...". Returns whether the plugin can change subtitles at all (it has to listen to them for that, see IsHearing)
+bool Function SetSayText(Actor speaker, string text) global native
+
+; What is around the character within rangeMeters, found by rays: eight directions, the first straight ahead of
+; the character and the others clockwise from there, three numbers each: what the ray met (0 = nothing,
+; 1 = a wall or another upright obstacle, 2 = ground that rises), how far away in meters (0 if nothing), and after
+; how many meters the ground drops away (-1 = it does not). Empty if the game cannot tell
+int[] Function GetSurroundings(Actor origin, int rangeMeters) global native

@@ -50,6 +50,14 @@ int Property MaxPlaceDoors = 6 AutoReadOnly
 int Property NativeVersionWithThings = 5 AutoReadOnly
 ; Things around the player: how far the plugin looks. They only go to the server when it asked for them
 int Property ThingRadiusMeters = 10 AutoReadOnly
+; From this interface version on the SKSE plugin knows the traps, the arrows that were shot, the surroundings by rays,
+; and can show what the companion really says as the subtitle of its line
+int Property NativeVersionWithRays = 9 AutoReadOnly
+; Traps around the viewer: how far the plugin looks and how many go to the server. They go along with every state
+int Property TrapRadiusMeters = 15 AutoReadOnly
+int Property MaxTraps = 6 AutoReadOnly
+; Surroundings: how far the rays of the plugin reach. They only go to the server when it asked for them
+int Property SurroundingsMeters = 15 AutoReadOnly
 ; Gold is an item like any other. This is its form ID in Skyrim.esm
 int Property GoldFormId = 0x0000000F AutoReadOnly
 string Property GoldFile = "Skyrim.esm" AutoReadOnly
@@ -71,12 +79,19 @@ int Property HandRight = 1 AutoReadOnly
 int Property ValuesPerNearby = 5 AutoReadOnly
 ; Form types of what a thing in the world is made from (Form.GetType as SKSE numbers them)
 int Property FormTypeContainer = 28 AutoReadOnly
+; The other kinds of things that can lie around and be picked up (see IsLooseItem)
+int Property FormTypeScroll = 23 AutoReadOnly
+int Property FormTypeBook = 27 AutoReadOnly
+int Property FormTypeIngredient = 30 AutoReadOnly
+int Property FormTypeMisc = 32 AutoReadOnly
+int Property FormTypeKey = 45 AutoReadOnly
+int Property FormTypeSoulGem = 52 AutoReadOnly
 int Property FormTypeFurniture = 40 AutoReadOnly
 ; What Actor.GetSitState returns for a character that sits (0 = not sitting, 2 = about to sit, 4 = about to get up)
 int Property SitStateSeated = 3 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 5 AutoReadOnly
+int Property ProtocolNumber = 6 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -113,6 +128,11 @@ int Property RoomDefaultMeters = 3 AutoReadOnly
 int Property RoomHighestMeters = 10 AutoReadOnly
 ; make_room: a companion that has moved less than this far has not made room
 float Property RoomMovedUnits = 70.0 AutoReadOnly
+; move: how far the companion walks if the server names no distance, and the furthest it may be sent.
+; A companion that stopped more than MoveShortUnits before the spot tells the AI so
+int Property MoveDefaultMeters = 5 AutoReadOnly
+int Property MoveHighestMeters = 30 AutoReadOnly
+float Property MoveShortUnits = 105.0 AutoReadOnly
 ; The quest of this mod that makes the companion sit: whoever is in its alias "Sitter" gets a package of the game
 ; that walks to whatever is in its alias "Seat" and uses it. Scripts cannot seat a character on their own
 int Property SitQuestFormId = 0x00000801 AutoReadOnly
@@ -183,6 +203,8 @@ string Property KEY_COMMAND_AROUND = "companion_around" AutoReadOnly
 string Property KEY_COMMAND_STATS = "companion_stats" AutoReadOnly
 ; For report_state: 1 if the list of characters should only hold those the viewer can see (see CanSee)
 string Property KEY_COMMAND_VISIBLE = "companion_visible" AutoReadOnly
+; For report_state: 1 if the state should carry what the rays of the plugin find around the companion
+string Property KEY_COMMAND_SPACE = "companion_space" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -211,6 +233,9 @@ string Property ACTION_SAY = "say" AutoReadOnly
 string Property ACTION_ENTER = "enter" AutoReadOnly
 string Property ACTION_EXPRESSION = "expression" AutoReadOnly
 string Property ACTION_MAKE_ROOM = "make_room" AutoReadOnly
+string Property ACTION_FACE = "face" AutoReadOnly
+string Property ACTION_MOVE = "move" AutoReadOnly
+string Property ACTION_PICK_UP = "pick_up" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -248,6 +273,14 @@ bool _isRoomWalk = false
 ObjectReference _roomMarker
 float _roomStartX = 0.0
 float _roomStartY = 0.0
+; move: the walk to the marker is one of move (the companion waits where it ends), and how far it was sent
+bool _isMoveWalk = false
+float _moveWantedUnits = 0.0
+; pick_up: the loot walk that is running leads to a thing that lies around, which the companion picks up there.
+; If that thing is an arrow that was shot, these are the two halves of its ID (both 0 = it is an item like any other)
+bool _isPickUp = false
+int _pickUpHigh = 0
+int _pickUpLow = 0
 ; How often the walk that is running was started again because the companion did not get going
 int _walkRestartCount = 0
 ; loot: the walk that is running leads to a body or a container. What to take there (None = everything),
@@ -282,6 +315,8 @@ bool _wantedAround = false
 bool _wantedStats = false
 ; Whether it asked only for what the viewer can see. Used up by BuildState
 bool _wantedVisible = false
+; Whether it asked for what the rays find around the companion. Used up by BuildState
+bool _wantedSpace = false
 ; While BuildState collects the characters nearby: whether only those the viewer can see go into the list
 bool _isVisibleOnlyScan = false
 
@@ -414,6 +449,8 @@ int Function BuildState()
     _wantedStats = false
     bool isVisibleWanted = _wantedVisible
     _wantedVisible = false
+    bool isSpaceWanted = _wantedSpace
+    _wantedSpace = false
     Actor companion = GetCompanion()
     Actor viewer = player
     bool isRemoteViewer = false
@@ -517,6 +554,23 @@ int Function BuildState()
         string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit, viewer)
         If thingLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "things", thingLines)
+        EndIf
+    EndIf
+
+    ; The traps close to the viewer go along every time, because a warning that has to be asked for comes too late.
+    ; One text per trap (see KI_MCP_Gefaehrte_Native.psc)
+    If _nativeVersion >= NativeVersionWithRays
+        string[] trapLines = KI_MCP_Gefaehrte_Native.GetNearbyTraps(TrapRadiusMeters, MaxTraps, viewer)
+        If trapLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "traps", trapLines)
+        EndIf
+        ; Only when the server asked for it: walls, rising ground and drops around the companion, found by rays.
+        ; Always seen from the companion, because it is the companion that walks by them (see the command move)
+        If isSpaceWanted && companion && companion.Is3DLoaded()
+            int[] spaceValues = KI_MCP_Gefaehrte_Native.GetSurroundings(companion, SurroundingsMeters)
+            If spaceValues.Length > 0
+                SKSE_HTTP.setIntArray(stateHandle, "space", spaceValues)
+            EndIf
         EndIf
     EndIf
 
@@ -1019,6 +1073,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedAround = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_AROUND, 0) != 0
             _wantedStats = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_STATS, 0) != 0
             _wantedVisible = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_VISIBLE, 0) != 0
+            _wantedSpace = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
@@ -1051,7 +1106,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, enter, make_room, loot, sit, look_at, gesture, expression, say, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -1084,6 +1139,16 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "The game mod is missing its lines for speaking. The mod has to be built and installed again."
         Else
             isOk = true
+            ; The line of this mod carries "..." as its text. The plugin shows what is really said as its subtitle.
+            ; If it cannot (an older DLL, or it does not listen to the subtitles), the text comes as a message instead
+            string sayWords = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+            bool isSubtitleSet = false
+            If _nativeVersion >= NativeVersionWithRays
+                isSubtitleSet = KI_MCP_Gefaehrte_Native.SetSayText(companion, sayWords)
+            EndIf
+            If !isSubtitleSet && sayWords != ""
+                Debug.Notification(companion.GetDisplayName() + ": " + sayWords)
+            EndIf
             companion.Say(sayTopic)
             resultText = "You say it aloud."
         EndIf
@@ -1128,6 +1193,59 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "You do the gesture '" + gestureName + "'. If it goes on and on, 'gesture' with 'stop' ends it."
         Else
             resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not sitting, not walking."
+        EndIf
+    ElseIf actionName == ACTION_FACE
+        ; The companion turns to a target (also one far away, as long as it is in the same area) or to a point of the
+        ; compass, which the server sends in degrees in the count (below 0 = it named none)
+        string faceText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        ObjectReference faceTarget = GetTargetForm(commandHandle) as ObjectReference
+        int faceDegrees = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1)
+        If faceText != ""
+            If !faceTarget
+                resultText = "There is nothing with the ref_id '" + faceText + "'. Take the ref_id from STATE."
+            ElseIf faceTarget == companion
+                resultText = "That is you yourself."
+            ElseIf !IsInSameArea(companion, faceTarget)
+                resultText = faceTarget.GetDisplayName() + " is not in the area you are in, so there is no direction to it."
+            EndIf
+        ElseIf faceDegrees < 0
+            resultText = "face needs a target or a direction."
+        EndIf
+        If resultText == "" && (_walkTarget || companion.IsInCombat() || companion.GetSitState() != 0)
+            resultText = "You cannot turn on the spot while you walk, fight or sit."
+        EndIf
+        If resultText == ""
+            isOk = true
+            resultText = DoFace(companion, faceTarget, faceDegrees, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, ""))
+        EndIf
+    ElseIf actionName == ACTION_MOVE
+        ; The server sends the direction in degrees in the count, 1 in the upper half of the item ID if it counts from
+        ; where the companion faces (0 = from north), how far in meters in the lower half, and the words of the AI for the answer
+        ObjectReference moveMarker = GetRoomMarker(companion)
+        If !companion.Is3DLoaded()
+            resultText = "You are not where the player is. 'follow' brings you back first."
+        ElseIf !moveMarker
+            resultText = "The game mod could not mark the spot to walk to."
+        Else
+            isOk = true
+            resultText = StartMoving(companion, moveMarker, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0) != 0, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0), SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, ""))
+        EndIf
+    ElseIf actionName == ACTION_PICK_UP
+        ; A thing that lies around, or an arrow that was shot. Such an arrow is no item for the game, so the plugin
+        ; tells whether the target is one, by its ID
+        int pickHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_HIGH, 0)
+        int pickLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_LOW, 0)
+        ObjectReference pickTarget = GetTargetForm(commandHandle) as ObjectReference
+        string arrowName = ""
+        If _nativeVersion >= NativeVersionWithRays
+            arrowName = KI_MCP_Gefaehrte_Native.GetRestingArrowName(pickHigh, pickLow)
+        EndIf
+        If arrowName == ""
+            resultText = GetPickUpProblem(companion, pickTarget, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""))
+        EndIf
+        If resultText == ""
+            isOk = true
+            resultText = StartPickUp(companion, pickTarget, arrowName, pickHigh, pickLow)
         EndIf
     ElseIf actionName == ACTION_MAKE_ROOM
         ; The server sends the direction as a number in the count (see RoomDirection...), how far in meters where loot
@@ -1221,6 +1339,9 @@ EndFunction
 
 bool Function IsKnownAction(string actionName)
     If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY || actionName == ACTION_ENTER || actionName == ACTION_EXPRESSION || actionName == ACTION_MAKE_ROOM
+        Return true
+    EndIf
+    If actionName == ACTION_FACE || actionName == ACTION_MOVE || actionName == ACTION_PICK_UP
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -1635,18 +1756,176 @@ string Function StartMakingRoom(Actor companion, ObjectReference roomMarker, int
     If meters < 1 || meters > RoomHighestMeters
         meters = RoomDefaultMeters
     EndIf
-    float stepUnits = meters * GameUnitsPerMeter
+    StartMarkerWalk(companion, roomMarker, stepX, stepY, meters * GameUnitsPerMeter)
+    If directionCode == RoomDirectionLeft || directionCode == RoomDirectionRight
+        Return "You step about " + meters + " meters to the " + directionName + ", as the player sees it. Apart from that you wait or follow as before."
+    EndIf
+    Return "You step back about " + meters + " meters, away from the player. Apart from that you wait or follow as before."
+EndFunction
 
+; Puts the marker stepUnits away from the companion, in the direction of the step (stepX to the east, stepY to the
+; north, together of the length 1), and starts the walk to it
+Function StartMarkerWalk(Actor companion, ObjectReference roomMarker, float stepX, float stepY, float stepUnits)
     _roomStartX = companion.GetPositionX()
     _roomStartY = companion.GetPositionY()
     roomMarker.MoveTo(companion, stepX * stepUnits, stepY * stepUnits, 0.0, false)
     _isRoomWalk = true
     _walkTarget = roomMarker
     StartWalk()
-    If directionCode == RoomDirectionLeft || directionCode == RoomDirectionRight
-        Return "You step about " + meters + " meters to the " + directionName + ", as the player sees it. Apart from that you wait or follow as before."
+EndFunction
+
+; ----------------------------------------------------------------------- move
+; move: the companion walks a number of meters in a direction and waits there, like move_to without a target.
+; It walks to the same marker make_room uses. Only call this after the command was checked.
+; degrees: the direction, counted clockwise from north, or from where the companion faces if isFromFacing
+string Function StartMoving(Actor companion, ObjectReference roomMarker, int degrees, bool isFromFacing, int meters, string directionWords)
+    ; As for move_to: what the command before started ends, and the companion stays where the walk takes it
+    EndWalk()
+    StopFleeing()
+    StopFollowingLeader()
+    StandUp()
+    StopGesture(companion)
+    SetWaiting(companion, true)
+    float heading = degrees
+    If isFromFacing
+        heading = heading + companion.GetAngleZ()
     EndIf
-    Return "You step back about " + meters + " meters, away from the player. Apart from that you wait or follow as before."
+    If meters < 1 || meters > MoveHighestMeters
+        meters = MoveDefaultMeters
+    EndIf
+    _isMoveWalk = true
+    _moveWantedUnits = meters * GameUnitsPerMeter
+    StartMarkerWalk(companion, roomMarker, Math.sin(heading), Math.cos(heading), _moveWantedUnits)
+    Return "You walk about " + meters + " meters " + directionWords + " and wait there. Your next STATE tells you if you did not get that far. 'follow' brings you back to the player."
+EndFunction
+
+; ----------------------------------------------------------------------- face
+; face: the companion turns its whole body to a target or to a point of the compass. Unlike look_at the target may be
+; far away, because only the direction to it counts
+
+; Whether the direction from the companion to the target means something: both are outdoors, or both in the same room.
+; The game does not tell the place of a target outdoors that is not loaded any better than this
+bool Function IsInSameArea(Actor companion, ObjectReference target)
+    Cell ownCell = companion.GetParentCell()
+    Cell targetCell = target.GetParentCell()
+    If ownCell && ownCell.IsInterior()
+        Return targetCell == ownCell
+    EndIf
+    Return !targetCell || !targetCell.IsInterior()
+EndFunction
+
+; Only call this after the command was checked. No target = the direction of the compass in degrees
+string Function DoFace(Actor companion, ObjectReference target, int degrees, string directionWords)
+    float heading = degrees
+    If target
+        heading = companion.GetAngleZ() + companion.GetHeadingAngle(target)
+    EndIf
+    companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), heading)
+    If target
+        Return "You turn to face " + target.GetDisplayName() + "."
+    EndIf
+    Return "You turn to face " + directionWords + "."
+EndFunction
+
+; -------------------------------------------------------------------- pick up
+; pick_up: the companion walks to a thing that lies around and takes it. The walk is the one of loot, with its watch:
+; a companion that does not get going takes the thing from where it stands, and afterwards it follows or waits as before
+
+; Whether this is a thing someone can pick up and carry
+bool Function IsLooseItem(ObjectReference target)
+    Form baseForm = target.GetBaseObject()
+    If !baseForm
+        Return false
+    EndIf
+    int kindOfThing = baseForm.GetType()
+    If kindOfThing == FormTypeWeapon || kindOfThing == FormTypeArmor || kindOfThing == FormTypeAmmo || kindOfThing == FormTypePotion || kindOfThing == FormTypeLight
+        Return true
+    EndIf
+    Return kindOfThing == FormTypeScroll || kindOfThing == FormTypeBook || kindOfThing == FormTypeIngredient || kindOfThing == FormTypeMisc || kindOfThing == FormTypeKey || kindOfThing == FormTypeSoulGem
+EndFunction
+
+; Returns why the companion cannot pick the target up, or "" if it can. Not for arrows that were shot
+string Function GetPickUpProblem(Actor companion, ObjectReference target, string targetText)
+    If !target
+        Return "There is nothing with the ref_id '" + targetText + "'. Take the ref_id of an item from 'Things' in STATE (argument 'things')."
+    EndIf
+    If target as Actor
+        Return target.GetDisplayName() + " is a character, not a thing to pick up."
+    EndIf
+    If IsContainer(target)
+        Return target.GetDisplayName() + " is a container. Use 'loot' to take what is in it."
+    EndIf
+    If !IsLooseItem(target)
+        Return target.GetDisplayName() + " is nothing you can pick up."
+    EndIf
+    If target.IsDisabled() || !IsInReach(target)
+        Return target.GetDisplayName() + " is not there any more, or too far away."
+    EndIf
+    Return ""
+EndFunction
+
+; Sends the companion to the thing. Only call this after the command was checked.
+; arrowName: not empty = the thing is an arrow that was shot, with the halves of its ID
+string Function StartPickUp(Actor companion, ObjectReference itemRef, string arrowName, int arrowHigh, int arrowLow)
+    ; A loot that gets cut short had made the companion wait, although it was following the player
+    bool followAgain = _isLootWalk && _followAfterLoot
+    EndWalk()
+    StopFleeing()
+    StopFollowingLeader()
+    StandUp()
+    StopGesture(companion)
+    If !itemRef
+        ; An arrow the script cannot get hold of as a thing to walk to. The companion takes it from where it stands
+        If followAgain
+            SetWaiting(companion, false)
+        EndIf
+        If KI_MCP_Gefaehrte_Native.TakeRestingArrow(companion, arrowHigh, arrowLow) == ""
+            Return "You took nothing: the arrow is not there any more."
+        EndIf
+        Return "You pick up " + arrowName + " from where you stand."
+    EndIf
+    string itemName = arrowName
+    _pickUpHigh = 0
+    _pickUpLow = 0
+    If arrowName != ""
+        _pickUpHigh = arrowHigh
+        _pickUpLow = arrowLow
+    Else
+        itemName = itemRef.GetDisplayName()
+    EndIf
+    ; Afterwards the companion does again what it did before: follow the player or wait
+    _followAfterLoot = followAgain || !IsWaiting(companion)
+    SetWaiting(companion, true)
+    _isLootWalk = true
+    _isPickUp = true
+    _lootItem = None
+    _walkTarget = itemRef
+    StartWalk()
+    Return "You walk to " + itemName + " to pick it up. Your next STATE tells you whether you got it."
+EndFunction
+
+; Called when the walk to the thing is over (see FinishLoot)
+Function FinishPickUp(Actor companion, ObjectReference itemRef)
+    If _pickUpHigh != 0 || _pickUpLow != 0
+        string arrowName = KI_MCP_Gefaehrte_Native.TakeRestingArrow(companion, _pickUpHigh, _pickUpLow)
+        _pickUpHigh = 0
+        _pickUpLow = 0
+        If arrowName == ""
+            AddReport("You took nothing: the arrow was not there any more.")
+        Else
+            AddReport("You picked up " + arrowName + ".")
+        EndIf
+        Return
+    EndIf
+    If !itemRef || itemRef.IsDisabled()
+        AddReport("You took nothing: the thing was not there any more.")
+        Return
+    EndIf
+    string itemName = itemRef.GetDisplayName()
+    ; Given a thing of the world instead of a kind of item, the game moves that very thing into the inventory.
+    ; The "true" keeps it from showing a message
+    companion.AddItem(itemRef, 1, true)
+    AddReport("You picked up " + itemName + ".")
 EndFunction
 
 ; ----------------------------------------------------------------------- loot
@@ -1713,6 +1992,15 @@ EndFunction
 ; Called when the walk to the body or container is over. The companion takes the things wherever it stands then:
 ; how close it got is not checked, because measuring that kept failing in the game although it stood next to the body
 Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownWalkNumber, bool hasArrived)
+    If _isPickUp
+        ; The walk led to a thing that lies around (see pick_up)
+        _isPickUp = false
+        FinishPickUp(companion, corpse)
+        If _followAfterLoot && ownWalkNumber == _walkNumber
+            SetWaiting(companion, false)
+        EndIf
+        Return
+    EndIf
     string lootName = GetLootName(corpse)
     string reportText = ""
     If corpse.IsDisabled()
@@ -1906,9 +2194,16 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     EndIf
     If isRoomWalk
         _isRoomWalk = false
+        bool isMoveWalk = _isMoveWalk
+        _isMoveWalk = false
         float steppedX = companion.GetPositionX() - _roomStartX
         float steppedY = companion.GetPositionY() - _roomStartY
-        If steppedX * steppedX + steppedY * steppedY < RoomMovedUnits * RoomMovedUnits
+        float steppedUnits = Math.sqrt(steppedX * steppedX + steppedY * steppedY)
+        If isMoveWalk
+            If steppedUnits < _moveWantedUnits - MoveShortUnits
+                AddReport("You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there.")
+            EndIf
+        ElseIf steppedUnits < RoomMovedUnits
             AddReport("You could not make room that way: something is in the way. Try another direction.")
         EndIf
         Return
@@ -1986,7 +2281,12 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
     EndIf
     If _isRoomWalk
         _isRoomWalk = false
-        AddReport("You could not make room: you did not get going. Try another direction.")
+        If _isMoveWalk
+            _isMoveWalk = false
+            AddReport("You did not get going: there seems to be no way in that direction. Try another one.")
+        Else
+            AddReport("You could not make room: you did not get going. Try another direction.")
+        EndIf
         Return
     EndIf
     AddReport("You did not get going towards " + walkTarget.GetDisplayName() + ". Try 'move_to' again, or 'follow'.")
@@ -2001,6 +2301,8 @@ Function EndWalk()
     _isLootWalk = false
     _isEnterWalk = false
     _isRoomWalk = false
+    _isMoveWalk = false
+    _isPickUp = false
     _lootItem = None
     _walkRestartCount = 0
 EndFunction
