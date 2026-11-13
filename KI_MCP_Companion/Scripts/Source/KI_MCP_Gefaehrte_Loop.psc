@@ -110,7 +110,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 8 AutoReadOnly
+int Property ProtocolNumber = 9 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -250,6 +250,35 @@ int Property SayMoodStrength = 70 AutoReadOnly
 ; say: the animation variable of the game that tells how fast a character moves, and below which value it counts as standing
 string Property SpeedVariable = "Speed" AutoReadOnly
 float Property StandingSpeedLimit = 1.0 AutoReadOnly
+; say: a companion that follows someone only counts as standing if it is within SayStillNearUnits of them and
+; neither of the two has moved by SayStillMovedUnits within SayStillSampleSeconds
+float Property SayStillSampleSeconds = 0.2 AutoReadOnly
+float Property SayStillMovedUnits = 12.0 AutoReadOnly
+float Property SayStillNearUnits = 450.0 AutoReadOnly
+; say: own event that watches a companion that moves its hands while it talks, and ends that as soon as it has to walk
+string Property EVENT_SAY_WATCH = "KI_MCP_Gefaehrte_SayWatch" AutoReadOnly
+; run: 1 in the command = run instead of walk (move_to, move, enter, follow)
+string Property KEY_COMMAND_RUN = "companion_run" AutoReadOnly
+; run: why the companion is in the alias "Walker" of the lead quest although it follows nobody because of follow with
+; a target. The package of that quest makes it run after whoever or whatever is in the alias "Leader":
+; the first stretch of a walk, follow with run, or catching up with the player on its own
+int Property RunModeNone = 0 AutoReadOnly
+int Property RunModeWalk = 1 AutoReadOnly
+int Property RunModeFollow = 2 AutoReadOnly
+int Property RunModeCatchUp = 3 AutoReadOnly
+; run: a walk is run until the companion is this close to where it goes, the rest it walks as always.
+; Every RunCheckSeconds the script looks how far it still is. If it has not come RunProgressUnits closer
+; RunStallChecks times in a row, the running is given up and it walks
+float Property RunNearUnits = 350.0 AutoReadOnly
+float Property RunCheckSeconds = 0.5 AutoReadOnly
+float Property RunProgressUnits = 30.0 AutoReadOnly
+int Property RunStallChecks = 5 AutoReadOnly
+; follow: own event that looks every FollowWatchSeconds whether the companion has fallen behind the player.
+; Further away than CatchUpStartUnits it runs until it is within CatchUpDoneUnits
+string Property EVENT_FOLLOW_WATCH = "KI_MCP_Gefaehrte_FollowWatch" AutoReadOnly
+float Property FollowWatchSeconds = 1.0 AutoReadOnly
+float Property CatchUpStartUnits = 700.0 AutoReadOnly
+float Property CatchUpDoneUnits = 300.0 AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -326,6 +355,13 @@ int _sayNumber = 0
 ObjectReference _sayLookTarget
 bool _isSayFaceSet = false
 bool _isSayPoseHeld = false
+; say: whether the watch over a companion that moves its hands while it talks is running (see OnSayWatchRequested)
+bool _isSayWatchRunning = false
+; run: whether the walk that was just started is to be run, why the companion is in the lead quest for running
+; (see RunModeNone), and the number of the watch over following that counts (an older one ends itself)
+bool _isRunWanted = false
+int _runMode = 0
+int _followWatchNumber = 0
 ; make_room: the walk that is running only takes the companion out of the way. The marker of this mod it walks to
 ; (made once, then moved to where it is needed), and where the companion stood when it set off
 bool _isRoomWalk = false
@@ -416,6 +452,8 @@ Function StartLoop()
     RegisterForModEvent(EVENT_WALK, "OnWalkRequested")
     RegisterForModEvent(EVENT_WALK_WATCH, "OnWalkWatchRequested")
     RegisterForModEvent(EVENT_SIT, "OnSitRequested")
+    RegisterForModEvent(EVENT_SAY_WATCH, "OnSayWatchRequested")
+    RegisterForModEvent(EVENT_FOLLOW_WATCH, "OnFollowWatchRequested")
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
     ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
     StopFleeing()
@@ -429,6 +467,10 @@ Function StartLoop()
     _sayLookTarget = None
     _isSayFaceSet = false
     _isSayPoseHeld = false
+    _isSayWatchRunning = false
+    ; The watch over following starts anew with every loaded game. The one from before finds a new number and ends
+    _followWatchNumber += 1
+    SendModEvent(EVENT_FOLLOW_WATCH, "", _followWatchNumber as float)
     ; The game forgets a changed game setting when it is closed. So what sheathe set is set again after loading
     If _keepsWeaponAway
         Game.SetGameSettingFloat(DrawWithPlayerSetting, 0.0)
@@ -800,7 +842,7 @@ EndFunction
 ; ref ID of whom the companion follows because of follow with a target (0 = the player or nobody),
 ; keeps its weapon put away because of sheathe
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[17]
+    int[] companionValues = new int[18]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -833,6 +875,7 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[15] = _leader.GetFormID()
     EndIf
     companionValues[16] = ToNumber(_keepsWeaponAway)
+    companionValues[17] = ToNumber(companion.IsRunning() || companion.IsSprinting())
     Return companionValues
 EndFunction
 
@@ -1297,17 +1340,21 @@ int Function RunCommand(int commandHandle, string actionName)
             If !isSubtitleSet && sayWords != ""
                 Debug.Notification(companion.GetDisplayName() + ": " + sayWords)
             EndIf
-            ; First the eyes (and the body, if it is turned far away), then the words, the face and the hands
+            ; First the eyes, then the words and the face. Turning the body and moving the hands only come
+            ; if the companion really stands around: finding that out takes a moment (see IsStandingAround)
             string lookNote = StartSayLook(companion, commandHandle)
             companion.Say(sayTopic)
             StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1))
-            PlaySayAnimation(companion, commandHandle)
+            If IsStandingAround(companion)
+                TurnToSayTarget(companion)
+                PlaySayAnimation(companion, commandHandle)
+            EndIf
             resultText = "You say it aloud." + lookNote
         EndIf
     ElseIf actionName == ACTION_SAY_TALK
         ; A long sentence: the server sends the next animation for the hands while the companion still speaks
         isOk = true
-        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber
+        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber && IsStandingAround(companion)
             PlaySayAnimation(companion, commandHandle)
         EndIf
         resultText = "ok"
@@ -1532,6 +1579,11 @@ int Function RunCommand(int commandHandle, string actionName)
                 resultText = DoCommand(companion, actionName, target)
             EndIf
         EndIf
+    EndIf
+
+    ; run: the walk that was just started is run, and follow makes the companion run after the player
+    If isOk && SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_RUN, 0) != 0
+        resultText = resultText + StartRunning(companion, actionName)
     EndIf
 
     int resultHandle = SKSE_HTTP.createDictionary()
@@ -1771,13 +1823,54 @@ EndFunction
 ; While the companion speaks it looks at whom it speaks to, its face can take on a look and its hands move.
 ; All of that only lasts for the sentence: the server sends say_end when the sound is over (see ReleaseSay)
 
-; Whether the companion stands around: not walking somewhere, not fighting, not sitting and not moving at all.
-; Only then say turns its body and plays animations, so that speaking never gets in the way of following or fighting
-bool Function IsStandingAround(Actor companion)
-    If _walkTarget || companion.IsInCombat() || companion.GetSitState() != 0
+; Whether the companion could stand around: not walking somewhere, not running to catch up, not fighting, not sitting,
+; and not moving as far as the game tells right away. (follow with run is looked at like any following: see IsStandingAround)
+bool Function IsHoldingStill(Actor companion)
+    If _walkTarget || _runMode == RunModeWalk || _runMode == RunModeCatchUp || companion.IsInCombat() || companion.GetSitState() != 0
         Return false
     EndIf
     Return companion.GetAnimationVariableFloat(SpeedVariable) < StandingSpeedLimit
+EndFunction
+
+; Whether the companion stands around. Only then say turns its body and plays animations, whatever the manner:
+; an animation for talking can stop a walking character on the spot, which made the companion fall behind.
+; A companion that follows someone has to be close to them, and neither of the two may be moving.
+; This call takes SayStillSampleSeconds, because it measures twice where the two are
+bool Function IsStandingAround(Actor companion)
+    If !IsHoldingStill(companion)
+        Return false
+    EndIf
+    Actor guide = None
+    If _hasLeader
+        guide = _leader
+    ElseIf !IsWaiting(companion)
+        guide = Game.GetPlayer()
+    EndIf
+    float guideX = 0.0
+    float guideY = 0.0
+    If guide
+        If companion.GetDistance(guide) > SayStillNearUnits
+            Return false
+        EndIf
+        guideX = guide.GetPositionX()
+        guideY = guide.GetPositionY()
+    EndIf
+    float ownX = companion.GetPositionX()
+    float ownY = companion.GetPositionY()
+    Utility.Wait(SayStillSampleSeconds)
+    float movedX = companion.GetPositionX() - ownX
+    float movedY = companion.GetPositionY() - ownY
+    If movedX * movedX + movedY * movedY > SayStillMovedUnits * SayStillMovedUnits
+        Return false
+    EndIf
+    If guide
+        movedX = guide.GetPositionX() - guideX
+        movedY = guide.GetPositionY() - guideY
+        If movedX * movedX + movedY * movedY > SayStillMovedUnits * SayStillMovedUnits
+            Return false
+        EndIf
+    EndIf
+    Return IsHoldingStill(companion)
 EndFunction
 
 ; say: makes the companion look at whom it speaks to. The target of the command is that character, no target means
@@ -1805,12 +1898,20 @@ string Function StartSayLook(Actor companion, int commandHandle)
     EndIf
     companion.SetLookAt(lookTarget)
     _sayLookTarget = lookTarget
-    ; The head only turns so far. If the target is further to the side and the companion stands around, the body turns as well
+    Return lookNote
+EndFunction
+
+; say: the head only turns so far. If whom the companion speaks to is further to the side, the body turns as well.
+; Only call this for a companion that stands around
+Function TurnToSayTarget(Actor companion)
+    ObjectReference lookTarget = _sayLookTarget
+    If !lookTarget
+        Return
+    EndIf
     float angle = companion.GetHeadingAngle(lookTarget)
-    If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && IsStandingAround(companion)
+    If angle > LookTurnDegrees || angle < -LookTurnDegrees
         companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
     EndIf
-    Return lookNote
 EndFunction
 
 ; say: the look that goes with how the companion speaks (below 0 = none). A look the AI put on with expression stays
@@ -1831,7 +1932,8 @@ Function StartSayFace(Actor companion, int mood)
 EndFunction
 
 ; say and say_talk: plays the animation the server picked for the hands: an animation event of the game by its name,
-; or an animation ("Idle") by its ID, sent where loot has the ID of an item. Only while the companion stands around
+; or an animation ("Idle") by its ID, sent where loot has the ID of an item.
+; Only call this for a companion that stands around (see IsStandingAround)
 Function PlaySayAnimation(Actor companion, int commandHandle)
     string talkEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
     int idleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
@@ -1839,7 +1941,7 @@ Function PlaySayAnimation(Actor companion, int commandHandle)
     If talkEvent == "" && idleHigh == 0 && idleLow == 0
         Return
     EndIf
-    If _isGesturing || companion.IsWeaponDrawn() || !IsStandingAround(companion)
+    If _isGesturing || companion.IsWeaponDrawn()
         Return
     EndIf
     If talkEvent != ""
@@ -1851,7 +1953,30 @@ Function PlaySayAnimation(Actor companion, int commandHandle)
             _isSayPoseHeld = true
         EndIf
     EndIf
+    If _isSayPoseHeld && !_isSayWatchRunning
+        _isSayWatchRunning = true
+        SendModEvent(EVENT_SAY_WATCH, "", _sayNumber as float)
+    EndIf
 EndFunction
+
+; Raised by PlaySayAnimation. While the companion moves its hands for a sentence, this keeps looking whether it still
+; stands around. As soon as it has to walk (whom it follows walks off, a fight, a new command), the animation is ended
+; at once instead of at the end of the sentence, so that the companion never stays behind in a pose
+Event OnSayWatchRequested(string eventName, string strArg, float numArg, Form sender)
+    Actor companion = GetCompanion()
+    While companion && _isSayPoseHeld
+        ; This call is what takes the time between two looks
+        If !IsStandingAround(companion) && _isSayPoseHeld
+            _isSayPoseHeld = false
+            If !_isGesturing
+                Debug.SendAnimationEvent(companion, AnimationEventDefault)
+            EndIf
+        Else
+            Utility.Wait(SayStillSampleSeconds)
+        EndIf
+    EndWhile
+    _isSayWatchRunning = false
+EndEvent
 
 ; The sentence is over: the eyes go back to what look_at holds (or are free again), the face is the companion's own
 ; again, and it stands normally again, because some of the animations for talking stay as a pose otherwise
@@ -1870,7 +1995,7 @@ Function ReleaseSay(Actor companion)
     EndIf
     If _isSayPoseHeld
         _isSayPoseHeld = false
-        If !_isGesturing && IsStandingAround(companion)
+        If !_isGesturing && IsHoldingStill(companion)
             Debug.SendAnimationEvent(companion, AnimationEventDefault)
         EndIf
     EndIf
@@ -2653,6 +2778,154 @@ Function ReleaseSeat()
     EndIf
 EndFunction
 
+; ------------------------------------------------------------------------ run
+; A character only runs if a package of the game tells it to: Actor.PathToReference, which does the walks of this mod,
+; only ever walks. The package of the lead quest (follow with a target) has "Run" as its speed. So for running the
+; companion is put into the alias "Walker" of that quest, and whom or what it is to run to into the alias "Leader"
+
+; Only call this if the companion follows nobody because of follow with a target (_hasLeader)
+Function StartRunningAfter(Actor companion, ObjectReference runTarget, int runMode)
+    ReferenceAlias walkerAlias = GetLeadAlias(LeadAliasWalker)
+    ReferenceAlias leaderAlias = GetLeadAlias(LeadAliasLeader)
+    If !walkerAlias || !leaderAlias
+        Return
+    EndIf
+    leaderAlias.ForceRefTo(runTarget)
+    walkerAlias.ForceRefTo(companion)
+    companion.EvaluatePackage()
+    _runMode = runMode
+EndFunction
+
+; Takes the companion out of the lead quest again, if it is only in there for running
+Function StopRunning()
+    If _runMode == RunModeNone
+        Return
+    EndIf
+    _runMode = RunModeNone
+    If _hasLeader
+        ; follow with a target has taken the aliases over
+        Return
+    EndIf
+    ReferenceAlias walkerAlias = GetLeadAlias(LeadAliasWalker)
+    ReferenceAlias leaderAlias = GetLeadAlias(LeadAliasLeader)
+    If !walkerAlias || !leaderAlias
+        Return
+    EndIf
+    Actor walker = walkerAlias.GetActorReference()
+    walkerAlias.Clear()
+    leaderAlias.Clear()
+    If walker
+        walker.EvaluatePackage()
+    EndIf
+EndFunction
+
+; run in a command that just did what it says. Returns what to add to the result for the AI
+string Function StartRunning(Actor companion, string actionName)
+    If !GetLeadAlias(LeadAliasWalker) || !GetLeadAlias(LeadAliasLeader)
+        Return " But the game mod is missing its quest for running, so you walk."
+    EndIf
+    If actionName == ACTION_FOLLOW
+        If _hasLeader
+            ; Whoever follows a character other than the player runs whenever that is needed already
+            Return ""
+        EndIf
+        StartRunningAfter(companion, Game.GetPlayer(), RunModeFollow)
+        Return " You run to keep up, until your next command."
+    EndIf
+    If (actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_ENTER) && _walkTarget
+        _isRunWanted = true
+        Return " You run there."
+    EndIf
+    Return ""
+EndFunction
+
+; The first stretch of a walk that is to be run: the companion runs until it is within RunNearUnits of walkTarget
+; (or does not get on), then OnWalkRequested walks the rest as always. shownTarget: the character a marker of move_to
+; stands in front of, or None. This call only comes back when the running is over
+Function RunNear(Actor companion, ObjectReference walkTarget, ObjectReference shownTarget, int ownWalkNumber)
+    If _hasLeader || !companion.Is3DLoaded()
+        Return
+    EndIf
+    float startDistance = companion.GetDistance(walkTarget)
+    If startDistance <= RunNearUnits
+        Return
+    EndIf
+    ; A character is sure to be something the package can follow, so the companion runs after it rather than its marker
+    ObjectReference runTarget = walkTarget
+    If shownTarget as Actor
+        runTarget = shownTarget
+    EndIf
+    StartRunningAfter(companion, runTarget, RunModeWalk)
+    If _runMode != RunModeWalk
+        Return
+    EndIf
+    float lastDistance = startDistance
+    int stallCount = 0
+    bool isRunOver = false
+    While !isRunOver
+        Utility.Wait(RunCheckSeconds)
+        If ownWalkNumber != _walkNumber || _runMode != RunModeWalk
+            ; A newer command has taken over and has ended the running already (see EndWalk)
+            Return
+        EndIf
+        float nowDistance = companion.GetDistance(walkTarget)
+        If nowDistance <= RunNearUnits
+            isRunOver = true
+        ElseIf lastDistance - nowDistance < RunProgressUnits
+            stallCount += 1
+            If stallCount >= RunStallChecks
+                isRunOver = true
+                ; The walk watch may start this walk again. Then it is walked from the beginning
+                _isRunWanted = false
+                If startDistance - nowDistance < RunProgressUnits
+                    AddReport("You could not run there, so you walk.")
+                EndIf
+            EndIf
+        Else
+            stallCount = 0
+        EndIf
+        lastDistance = nowDistance
+    EndWhile
+    StopRunning()
+EndFunction
+
+; Raised by StartLoop. Looks again and again whether the companion has fallen behind the player (see CheckCatchUp).
+; numArg is the number of this watch: a newer one (after loading a game) makes this one end
+Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownWatchNumber = numArg as int
+    While ownWatchNumber == _followWatchNumber
+        Utility.Wait(FollowWatchSeconds)
+        If ownWatchNumber == _followWatchNumber
+            CheckCatchUp()
+        EndIf
+    EndWhile
+EndEvent
+
+; follow: a companion that follows the player and has fallen behind by more than CatchUpStartUnits runs
+; until it has caught up, without anybody telling it to
+Function CheckCatchUp()
+    Actor companion = GetCompanion()
+    If !companion
+        Return
+    EndIf
+    Actor player = Game.GetPlayer()
+    If _runMode == RunModeCatchUp
+        If IsWaiting(companion) || companion.IsInCombat() || !companion.Is3DLoaded() || companion.GetDistance(player) <= CatchUpDoneUnits
+            StopRunning()
+        EndIf
+        Return
+    EndIf
+    If _runMode != RunModeNone || _hasLeader || _walkTarget || _seat || _fleeingActor == companion
+        Return
+    EndIf
+    If companion.IsDead() || !companion.Is3DLoaded() || IsWaiting(companion) || companion.IsInCombat() || companion.GetSitState() != 0
+        Return
+    EndIf
+    If companion.GetDistance(player) > CatchUpStartUnits
+        StartRunningAfter(companion, player, RunModeCatchUp)
+    EndIf
+EndFunction
+
 ; ----------------------------------------------------------------------- walk
 ; move_to: the companion walks to a character or a thing and waits there. loot walks the same way.
 ; sit does not: there the package of the sit quest does the walking (see OnSitRequested)
@@ -2682,6 +2955,16 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     Utility.Wait(WalkStartPauseSeconds)
     If ownWalkNumber != _walkNumber
         Return
+    EndIf
+    ; run: the first stretch is run, with the package of the lead quest (see RunNear)
+    If _isRunWanted
+        RunNear(companion, walkTarget, shownTarget, ownWalkNumber)
+        If ownWalkNumber != _walkNumber
+            Return
+        EndIf
+    ElseIf _runMode == RunModeWalk
+        ; A walk that was started again after its running did not get on
+        StopRunning()
     EndIf
     ; This call only comes back when the companion has arrived, found no way or was sent somewhere else
     bool hasArrived = companion.PathToReference(walkTarget, WalkSpeed)
@@ -2826,6 +3109,8 @@ EndEvent
 ; A walk that is still running finds a new number when it comes back and then stays silent
 Function EndWalk()
     _walkNumber += 1
+    _isRunWanted = false
+    StopRunning()
     _walkTarget = None
     _walkShownTarget = None
     _isSitWalk = false
