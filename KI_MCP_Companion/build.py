@@ -19,7 +19,9 @@ import os
 import shutil
 import subprocess
 import sys
+import struct
 import urllib.request
+import wave
 import zipfile
 from typing import List, Optional
 
@@ -31,6 +33,20 @@ NATIVE_PLUGIN = "KI_MCP_Gefaehrte.dll"
 HTTP_SCRIPT = "SKSE_HTTP"
 HTTP_PLUGIN = "SKSE_HTTP.dll"
 FLAGS_FILE = "TESV_Papyrus_Flags.flg"
+# For the command say: the companion server puts the sound of what the companion says into
+# Data\Sound\Voice\<plugin>\<voice>\<one of these names>.wav. The names are made by the game:
+# the first 10 letters of the quest, the first 15 of the topic, the ID of the response, its number
+VOICE_LINE_FILES = ["KI_MCP_Say_KI_MCP_SayOne_00000805_1.wav", "KI_MCP_Say_KI_MCP_SayTwo_00000807_1.wav"]
+# The voices that get a folder (one name per line, lines with # in front are notes)
+VOICE_FOLDERS_FILE = "voice_folders.txt"
+# The group "Users" of Windows, by its fixed number, so that it works in every language of Windows
+WINDOWS_USERS_GROUP = "*S-1-5-32-545"
+# The game only lets characters speak the lines of a quest that starts with the game if a file Data\Seq\<plugin>.seq
+# names that quest (otherwise only after saving and loading once). The file is a row of quest IDs, four bytes each,
+# as they stand in the plugin: the local ID with the number of masters of the plugin in front (one master: Skyrim.esm)
+SEQ_QUEST_IDS = [0x01000803]
+SILENCE_SAMPLE_RATE = 22050
+SILENCE_SECONDS = 0.2
 
 DEFAULT_CREATION_KIT_FOLDER = r"F:\SteamLibrary\steamapps\common\skyrim"
 DEFAULT_GAME_FOLDER = r"C:\Program Files (x86)\Steam\steamapps\common\SkyrimVR"
@@ -275,6 +291,60 @@ def check_address_library(game_folder: str, skse_plugins_folder: str) -> None:
     say("WARNING: No Address Library (version-....csv) in " + skse_plugins_folder + ". Without it " + HTTP_PLUGIN + " does not load.")
 
 
+def read_voice_folders() -> List[str]:
+    names = []
+    with open(os.path.join(HERE, VOICE_FOLDERS_FILE), "r", encoding="utf-8") as opened:
+        for line in opened.read().splitlines():
+            if line.strip() != "" and not line.strip().startswith("#"):
+                names.append(line.strip())
+    return names
+
+
+def write_silence(file: str) -> None:
+    with wave.open(file, "wb") as opened:
+        opened.setnchannels(1)
+        opened.setsampwidth(2)
+        opened.setframerate(SILENCE_SAMPLE_RATE)
+        opened.writeframes(b"\x00\x00" * int(SILENCE_SAMPLE_RATE * SILENCE_SECONDS))
+
+
+def install_voice_folders(data_folder: str) -> None:
+    """Prepares the folders for the command say. The game only finds sound files that were there when it started,
+    so every voice gets its folder with silent files, which the companion server overwrites later.
+    The server does not run as administrator, so the normal users of this PC get the right to write there"""
+    voice_root = os.path.join(data_folder, "Sound", "Voice", PLUGIN_NAME)
+    created = 0
+    try:
+        for voice in read_voice_folders():
+            voice_folder = os.path.join(voice_root, voice)
+            os.makedirs(voice_folder, exist_ok=True)
+            for file_name in VOICE_LINE_FILES:
+                file = os.path.join(voice_folder, file_name)
+                if not os.path.isfile(file):
+                    write_silence(file)
+                    created += 1
+    except OSError as error:
+        raise BuildError("Could not prepare the voice folders in " + voice_root + ": " + str(error))
+    say("Voice folders for 'say' are in " + voice_root + " (" + str(created) + " new silent files)")
+    if os.name == "nt":
+        if run(["icacls", voice_root, "/grant", WINDOWS_USERS_GROUP + ":(OI)(CI)M", "/T", "/Q"], voice_root) != 0:
+            say("WARNING: Could not give the users of this PC the right to write into " + voice_root
+                + ". Then the companion server can only make the companion speak if it runs as administrator.")
+
+
+def install_seq_file(data_folder: str) -> None:
+    seq_folder = os.path.join(data_folder, "Seq")
+    seq_file = os.path.join(seq_folder, os.path.splitext(PLUGIN_NAME)[0] + ".seq")
+    try:
+        os.makedirs(seq_folder, exist_ok=True)
+        with open(seq_file, "wb") as opened:
+            for quest_id in SEQ_QUEST_IDS:
+                opened.write(struct.pack("<I", quest_id))
+    except OSError as error:
+        raise BuildError("Could not write " + seq_file + ": " + str(error))
+    say("Written " + seq_file)
+
+
 def install(game_folder: str, plugins_file: str, compiled_files: List[str], plugin: str) -> None:
     data_folder = os.path.join(game_folder, "Data")
     if not os.path.isdir(data_folder):
@@ -293,6 +363,8 @@ def install(game_folder: str, plugins_file: str, compiled_files: List[str], plug
         say("NOTE: " + native_plugin + " is missing. The mod works without it, but the AI does not get the quests. "
             "Download the DLL from the last successful build of the plugin repository on GitHub (Actions, Artifacts) and put it there.")
     check_address_library(game_folder, skse_plugins_folder)
+    install_voice_folders(data_folder)
+    install_seq_file(data_folder)
     activate_plugin(plugins_file)
     if len(glob.glob(os.path.join(game_folder, "skse*_loader.exe"))) == 0:
         say("WARNING: No SKSE loader (skse..._loader.exe) in " + game_folder + ". The mod needs SKSE.")

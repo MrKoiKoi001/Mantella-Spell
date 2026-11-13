@@ -53,3 +53,10 @@ string[] Function GetNearbyPlaces(int radiusMeters, int maxMarkers, int maxDoors
 ; ref ID as eight hex digits, distance to the viewer in meters, angle from where the viewer faces in degrees
 ; (negative = left), for furniture 1 if a character can sit on it, for a container 1 if it is locked, name
 string[] Function GetNearbyThings(int radiusMeters, int maxPerKind, Actor origin) global native
+
+; The function below exists from interface version 6 on
+
+; The name of the voice of a character as the files of the game know it: the editor ID of its voice type
+; (eg FemaleEvenToned). The game looks for the sound of what a character says in a folder of that name.
+; Empty if the character has no voice
+string Function GetVoiceTypeName(Actor target) global native

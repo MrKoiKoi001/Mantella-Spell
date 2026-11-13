@@ -1,0 +1,6 @@
+FormKey: 000806:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_SayTwo
+Quest: 000803:KI_MCP_Gefaehrte.esp
+Category: Misc
+Subtype: DestroyObject
+SubtypeName: DEOB

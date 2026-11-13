@@ -1,0 +1,7 @@
+FormKey: 000803:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Say
+Flags:
+- StartGameEnabled
+- 0x10
+Type: Misc
+NextAliasID: 0

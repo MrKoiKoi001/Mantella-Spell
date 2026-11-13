@@ -1,0 +1,17 @@
+FormKey: 000807:KI_MCP_Gefaehrte.esp
+Flags: {}
+Topic: 000806:KI_MCP_Gefaehrte.esp
+PreviousDialog: Null
+FavorLevel: None
+Responses:
+- EmotionValue: 50
+  ResponseNumber: 1
+  Unknown2: 0x000000
+  Flags:
+  - UseEmotionAnimation
+  Unknown3: 0x000000
+  Text:
+    TargetLanguage: English
+    Value: '...'
+  ScriptNotes: ''
+  Edits: ''

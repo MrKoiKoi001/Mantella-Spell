@@ -109,6 +109,15 @@ int Property SitAliasSeat = 1 AutoReadOnly
 ; How long the companion gets to walk to a seat and sit down, and how often the script looks whether it sits
 float Property SitTimeoutSeconds = 40.0 AutoReadOnly
 float Property SitCheckSeconds = 1.0 AutoReadOnly
+; From this interface version on the SKSE plugin can tell the name of a character's voice
+int Property NativeVersionWithVoice = 6 AutoReadOnly
+; say: the two lines of this mod the companion can speak (topics in the plugin of this mod). The companion server
+; puts the sound of what is to be said where the game looks for the sound of these lines. There are two of them
+; because the game may still hold on to the sound file of the line that was spoken last
+int Property SayTopicOneFormId = 0x00000804 AutoReadOnly
+int Property SayTopicTwoFormId = 0x00000806 AutoReadOnly
+; The quest of this mod the two lines belong to. A character can only speak the lines of a quest that is running
+int Property SayQuestFormId = 0x00000803 AutoReadOnly
 ; look_at only turns the head, and a head does not turn all the way round. If the target is further to the side
 ; than this many degrees, the body turns as well
 float Property LookTurnDegrees = 70.0 AutoReadOnly
@@ -167,6 +176,7 @@ string Property ACTION_LOOT = "loot" AutoReadOnly
 string Property ACTION_SIT = "sit" AutoReadOnly
 string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
 string Property ACTION_GESTURE = "gesture" AutoReadOnly
+string Property ACTION_SAY = "say" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -443,6 +453,13 @@ int Function BuildState()
     If companion
         companionTarget = companion.GetCombatTarget()
         SetStringSafely(stateHandle, "companion_name", companion.GetDisplayName())
+        ; The name of the companion's voice (eg FemaleEvenToned). The server needs it for the command say
+        If _nativeVersion >= NativeVersionWithVoice
+            string voiceName = KI_MCP_Gefaehrte_Native.GetVoiceTypeName(companion)
+            If voiceName != ""
+                SetStringSafely(stateHandle, "companion_voice", voiceName)
+            EndIf
+        EndIf
         SKSE_HTTP.setIntArray(stateHandle, "companion", BuildCompanionValues(companion, player, companionTarget))
     EndIf
 
@@ -829,7 +846,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, look_at, gesture, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, look_at, gesture, say, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -853,6 +870,17 @@ int Function RunCommand(int commandHandle, string actionName)
         If resultText == ""
             isOk = true
             resultText = DoLookAt(companion, lookTarget)
+        EndIf
+    ElseIf actionName == ACTION_SAY
+        ; The server has made the sound of what is to be said and has put it where the game looks for the sound
+        ; of one of the two lines of this mod. Which one of the two is in the count of the command
+        Topic sayTopic = GetSayTopic(SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1))
+        If !sayTopic
+            resultText = "The game mod is missing its lines for speaking. The mod has to be built and installed again."
+        Else
+            isOk = true
+            companion.Say(sayTopic)
+            resultText = "You say it aloud."
         EndIf
     ElseIf actionName == ACTION_GESTURE
         ; The server knows the gestures by name and sends the ID of the animation. No ID means: end the gesture
@@ -933,7 +961,7 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE
+    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -1100,6 +1128,19 @@ string Function DoLookAt(Actor companion, ObjectReference target)
         companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
     EndIf
     Return "You look at " + target.GetDisplayName() + " now. 'look_at' without a target lets you look around freely again."
+EndFunction
+
+; One of the two lines the companion can speak for say: line 2 is the second one, every other number the first
+Topic Function GetSayTopic(int lineNumber)
+    ; The quest of the lines starts with the game. In a save from before it existed it may not be running yet
+    Quest sayQuest = Game.GetFormFromFile(SayQuestFormId, OwnPluginFile) as Quest
+    If sayQuest && !sayQuest.IsRunning()
+        sayQuest.Start()
+    EndIf
+    If lineNumber == 2
+        Return Game.GetFormFromFile(SayTopicTwoFormId, OwnPluginFile) as Topic
+    EndIf
+    Return Game.GetFormFromFile(SayTopicOneFormId, OwnPluginFile) as Topic
 EndFunction
 
 ; Ends a gesture that may still be running
