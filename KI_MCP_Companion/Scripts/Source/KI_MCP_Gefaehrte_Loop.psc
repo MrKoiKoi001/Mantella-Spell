@@ -21,6 +21,8 @@ float Property NearbyRadiusMeters = 50.0 AutoReadOnly
 ; From interface version 11 on the SKSE plugin lists the characters of the whole loaded area (GetCharactersAround).
 ; With it, "Nearby" reaches this far outdoors, so that archers on a tower and game far off are in the list
 int Property NativeVersionWithAround = 11 AutoReadOnly
+; From interface version 12 on the SKSE plugin can cut off what the game lets the companion say on its own (SetMutedSpeaker)
+int Property NativeVersionWithMute = 12 AutoReadOnly
 float Property NearbyOutdoorRadiusMeters = 200.0 AutoReadOnly
 ; Outdoors the world is cut into cells, and only the cell the player stands in can be listed completely.
 ; To also catch characters in the cells next to it, this many random characters in reach are drawn in addition
@@ -237,6 +239,8 @@ string Property KEY_COMMAND_SPACE = "companion_space" AutoReadOnly
 string Property KEY_COMMAND_FIND = "companion_find" AutoReadOnly
 ; say: the animation event that moves the hands of the companion while it talks ("" = none)
 string Property KEY_COMMAND_TALK = "companion_talk" AutoReadOnly
+; report_state: 1 = the sentences the game lets the companion say on its own are to be cut off (a setting of the server)
+string Property KEY_COMMAND_MUTE = "companion_mute" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -371,6 +375,9 @@ bool _isVisibleOnlyScan = false
 ; sheathe: the companion keeps its weapon put away although the player draws one, and what the game setting
 ; for drawing with the player was before (0 = not read yet)
 bool _keepsWeaponAway = false
+; Whether the server wants the sentences cut off that the game lets the companion say on its own.
+; Kept from one report_state to the next, and in the save, so that it also holds right after loading
+bool _isMuteWanted = false
 float _drawWithPlayerUnits = 0.0
 
 ; --------------------------------------------------------------------- events
@@ -519,6 +526,15 @@ int Function BuildState()
         ElseIf _nativeVersion >= NativeVersionWithDoors && IsInOtherInterior(companion, playerCell)
             viewer = companion
             isRemoteViewer = true
+        EndIf
+    EndIf
+    ; The plugin is told with every state whose own sentences of the game it has to cut off: the companion of the
+    ; moment, or nobody. So a new follower is muted in place of the one before, and switching it off counts at once
+    If _nativeVersion >= NativeVersionWithMute
+        If _isMuteWanted
+            KI_MCP_Gefaehrte_Native.SetMutedSpeaker(companion)
+        Else
+            KI_MCP_Gefaehrte_Native.SetMutedSpeaker(None)
         EndIf
     EndIf
     ; A companion that was sent away while it sat would keep sitting for good
@@ -1178,6 +1194,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedVisible = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_VISIBLE, 0) != 0
             _wantedSpace = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE, 0) != 0
             _wantedFind = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_FIND, "")
+            _isMuteWanted = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_MUTE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf

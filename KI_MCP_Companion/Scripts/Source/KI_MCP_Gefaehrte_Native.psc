@@ -122,3 +122,11 @@ string[] Function FindByName(string text, int maxResults, Actor origin) global n
 ; the dead, each nearest first. People and animals alike, without the player and without origin.
 ; For "Nearby" outdoors, where a script only reaches the characters of the one cell it stands in
 Actor[] Function GetCharactersAround(Actor origin, int radiusMeters, int maxCharacters) global native
+
+; The function below exists from interface version 12 on
+
+; Mute: from now on the sentences the game lets this character say on its own (idle talk, taunts in a fight,
+; greetings) are cut off as they begin, and their subtitles are not shown. None = nobody is muted any more.
+; Grunts and cries stay, so do the lines of this mod (say) and what the character answers in the dialogue menu.
+; Returns whether the plugin can do that at all (it has to listen to the subtitles for it, see IsHearing)
+bool Function SetMutedSpeaker(Actor speaker) global native
