@@ -110,7 +110,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 7 AutoReadOnly
+int Property ProtocolNumber = 8 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -241,6 +241,15 @@ string Property KEY_COMMAND_FIND = "companion_find" AutoReadOnly
 string Property KEY_COMMAND_TALK = "companion_talk" AutoReadOnly
 ; report_state: 1 = the sentences the game lets the companion say on its own are to be cut off (a setting of the server)
 string Property KEY_COMMAND_MUTE = "companion_mute" AutoReadOnly
+; say, say_talk and say_end: the number the server gave the sentence. say_talk and say_end only count for the
+; sentence that was started last
+string Property KEY_COMMAND_SAY_NUMBER = "companion_say_number" AutoReadOnly
+; say: the number of the look the face takes on while the companion speaks (below 0 = none), and how strong in percent
+string Property KEY_COMMAND_FACE = "companion_face" AutoReadOnly
+int Property SayMoodStrength = 70 AutoReadOnly
+; say: the animation variable of the game that tells how fast a character moves, and below which value it counts as standing
+string Property SpeedVariable = "Speed" AutoReadOnly
+float Property StandingSpeedLimit = 1.0 AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -266,6 +275,10 @@ string Property ACTION_SIT = "sit" AutoReadOnly
 string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
 string Property ACTION_GESTURE = "gesture" AutoReadOnly
 string Property ACTION_SAY = "say" AutoReadOnly
+; say: two commands only the server sends, never the AI. say_talk = play the next animation of a long sentence,
+; say_end = the sentence is over, so the eyes, the face and the stance go back to what they were (see ReleaseSay)
+string Property ACTION_SAY_TALK = "say_talk" AutoReadOnly
+string Property ACTION_SAY_END = "say_end" AutoReadOnly
 string Property ACTION_ENTER = "enter" AutoReadOnly
 string Property ACTION_EXPRESSION = "expression" AutoReadOnly
 string Property ACTION_MAKE_ROOM = "make_room" AutoReadOnly
@@ -307,6 +320,12 @@ bool _isEnterWalk = false
 ObjectReference _entryDoor
 ; expression: how the companion looks because of it, as the AI named it ("" = its own face)
 string _expressionName = ""
+; say: the number of the sentence that was started last, whom the companion looks at only because it speaks
+; (None = nobody), whether its face carries a look only because it speaks, and whether an animation of say was played
+int _sayNumber = 0
+ObjectReference _sayLookTarget
+bool _isSayFaceSet = false
+bool _isSayPoseHeld = false
 ; make_room: the walk that is running only takes the companion out of the way. The marker of this mod it walks to
 ; (made once, then moved to where it is needed), and where the companion stood when it set off
 bool _isRoomWalk = false
@@ -402,6 +421,14 @@ Function StartLoop()
     StopFleeing()
     EndWalk()
     _isGesturing = false
+    ; A sentence that was being spoken when the game was saved is over: its say_end will not come any more
+    Actor speaker = GetCompanion()
+    If speaker
+        ReleaseSay(speaker)
+    EndIf
+    _sayLookTarget = None
+    _isSayFaceSet = false
+    _isSayPoseHeld = false
     ; The game forgets a changed game setting when it is closed. So what sheathe set is set again after loading
     If _keepsWeaponAway
         Game.SetGameSettingFloat(DrawWithPlayerSetting, 0.0)
@@ -1270,15 +1297,27 @@ int Function RunCommand(int commandHandle, string actionName)
             If !isSubtitleSet && sayWords != ""
                 Debug.Notification(companion.GetDisplayName() + ": " + sayWords)
             EndIf
+            ; First the eyes (and the body, if it is turned far away), then the words, the face and the hands
+            string lookNote = StartSayLook(companion, commandHandle)
             companion.Say(sayTopic)
-            ; Hands that move while talking: the server names an animation event of the game for it ("" = none).
-            ; Only while the companion stands around, so that it does not get in the way of walking, fighting or sitting
-            string talkEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
-            If talkEvent != "" && !_walkTarget && !_isGesturing && !companion.IsInCombat() && !companion.IsWeaponDrawn() && companion.GetSitState() == 0
-                Debug.SendAnimationEvent(companion, talkEvent)
-            EndIf
-            resultText = "You say it aloud."
+            StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1))
+            PlaySayAnimation(companion, commandHandle)
+            resultText = "You say it aloud." + lookNote
         EndIf
+    ElseIf actionName == ACTION_SAY_TALK
+        ; A long sentence: the server sends the next animation for the hands while the companion still speaks
+        isOk = true
+        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber
+            PlaySayAnimation(companion, commandHandle)
+        EndIf
+        resultText = "ok"
+    ElseIf actionName == ACTION_SAY_END
+        ; The sentence is over, the server knows how long its sound is
+        isOk = true
+        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber
+            ReleaseSay(companion)
+        EndIf
+        resultText = "ok"
     ElseIf actionName == ACTION_SHEATHE
         ; A follower draws its weapon whenever the player draws one. sheathe switches that off and puts the weapon away
         If companion.IsInCombat()
@@ -1324,6 +1363,7 @@ int Function RunCommand(int commandHandle, string actionName)
             isOk = true
             companion.ClearExpressionOverride()
             _expressionName = ""
+            _isSayFaceSet = false
             resultText = "Your face is your own again."
         ElseIf mood > HighestMood
             resultText = "The game has no look with the number " + mood + "."
@@ -1335,6 +1375,7 @@ int Function RunCommand(int commandHandle, string actionName)
             EndIf
             companion.SetExpressionOverride(mood, moodStrength)
             _expressionName = moodName
+            _isSayFaceSet = false
             resultText = "You look " + moodName + " now. Your face stays like this until 'expression' with 'none'."
         EndIf
     ElseIf actionName == ACTION_GESTURE
@@ -1507,7 +1548,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY || actionName == ACTION_ENTER || actionName == ACTION_EXPRESSION || actionName == ACTION_MAKE_ROOM
         Return true
     EndIf
-    If actionName == ACTION_FACE || actionName == ACTION_MOVE || actionName == ACTION_PICK_UP
+    If actionName == ACTION_FACE || actionName == ACTION_MOVE || actionName == ACTION_PICK_UP || actionName == ACTION_SAY_TALK || actionName == ACTION_SAY_END
         Return true
     EndIf
     If actionName == ACTION_SHEATHE || actionName == ACTION_DRAW || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
@@ -1709,6 +1750,8 @@ EndFunction
 
 ; Only call this after the command was checked. No target = look around freely again
 string Function DoLookAt(Actor companion, ObjectReference target)
+    ; From here on the AI says where the eyes go, so the end of a sentence must not move them any more
+    _sayLookTarget = None
     If !target
         companion.ClearLookAt()
         _lookTarget = None
@@ -1722,6 +1765,115 @@ string Function DoLookAt(Actor companion, ObjectReference target)
         companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
     EndIf
     Return "You look at " + target.GetDisplayName() + " now. 'look_at' without a target lets you look around freely again."
+EndFunction
+
+; ------------------------------------------------------------ say: eyes, face, hands
+; While the companion speaks it looks at whom it speaks to, its face can take on a look and its hands move.
+; All of that only lasts for the sentence: the server sends say_end when the sound is over (see ReleaseSay)
+
+; Whether the companion stands around: not walking somewhere, not fighting, not sitting and not moving at all.
+; Only then say turns its body and plays animations, so that speaking never gets in the way of following or fighting
+bool Function IsStandingAround(Actor companion)
+    If _walkTarget || companion.IsInCombat() || companion.GetSitState() != 0
+        Return false
+    EndIf
+    Return companion.GetAnimationVariableFloat(SpeedVariable) < StandingSpeedLimit
+EndFunction
+
+; say: makes the companion look at whom it speaks to. The target of the command is that character, no target means
+; the player. A look_at of the AI that still holds stays if say names no target.
+; Returns what to add to the result for the AI ("" = nothing)
+string Function StartSayLook(Actor companion, int commandHandle)
+    _sayNumber = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0)
+    string lookText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+    ObjectReference lookTarget = GetTargetForm(commandHandle) as ObjectReference
+    string lookNote = ""
+    If lookText != "" && (!lookTarget || lookTarget == companion || !lookTarget.Is3DLoaded())
+        lookNote = " But '" + lookText + "' is not around here, so you do not look at them while you speak."
+        lookTarget = None
+    EndIf
+    If !lookTarget
+        If _lookTarget
+            ; The AI keeps the eyes on something on purpose. A sentence before this one may have moved them away
+            If _sayLookTarget
+                companion.SetLookAt(_lookTarget)
+                _sayLookTarget = None
+            EndIf
+            Return lookNote
+        EndIf
+        lookTarget = Game.GetPlayer()
+    EndIf
+    companion.SetLookAt(lookTarget)
+    _sayLookTarget = lookTarget
+    ; The head only turns so far. If the target is further to the side and the companion stands around, the body turns as well
+    float angle = companion.GetHeadingAngle(lookTarget)
+    If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && IsStandingAround(companion)
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+    EndIf
+    Return lookNote
+EndFunction
+
+; say: the look that goes with how the companion speaks (below 0 = none). A look the AI put on with expression stays
+Function StartSayFace(Actor companion, int mood)
+    If _expressionName != ""
+        _isSayFaceSet = false
+        Return
+    EndIf
+    If mood < 0 || mood > HighestMood
+        If _isSayFaceSet
+            _isSayFaceSet = false
+            companion.ClearExpressionOverride()
+        EndIf
+        Return
+    EndIf
+    companion.SetExpressionOverride(mood, SayMoodStrength)
+    _isSayFaceSet = true
+EndFunction
+
+; say and say_talk: plays the animation the server picked for the hands: an animation event of the game by its name,
+; or an animation ("Idle") by its ID, sent where loot has the ID of an item. Only while the companion stands around
+Function PlaySayAnimation(Actor companion, int commandHandle)
+    string talkEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
+    int idleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
+    int idleLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+    If talkEvent == "" && idleHigh == 0 && idleLow == 0
+        Return
+    EndIf
+    If _isGesturing || companion.IsWeaponDrawn() || !IsStandingAround(companion)
+        Return
+    EndIf
+    If talkEvent != ""
+        Debug.SendAnimationEvent(companion, talkEvent)
+        _isSayPoseHeld = true
+    Else
+        Idle talkIdle = GetFormFromHalves(idleHigh, idleLow) as Idle
+        If talkIdle && companion.PlayIdle(talkIdle)
+            _isSayPoseHeld = true
+        EndIf
+    EndIf
+EndFunction
+
+; The sentence is over: the eyes go back to what look_at holds (or are free again), the face is the companion's own
+; again, and it stands normally again, because some of the animations for talking stay as a pose otherwise
+Function ReleaseSay(Actor companion)
+    If _sayLookTarget
+        _sayLookTarget = None
+        If _lookTarget
+            companion.SetLookAt(_lookTarget)
+        Else
+            companion.ClearLookAt()
+        EndIf
+    EndIf
+    If _isSayFaceSet
+        _isSayFaceSet = false
+        companion.ClearExpressionOverride()
+    EndIf
+    If _isSayPoseHeld
+        _isSayPoseHeld = false
+        If !_isGesturing && IsStandingAround(companion)
+            Debug.SendAnimationEvent(companion, AnimationEventDefault)
+        EndIf
+    EndIf
 EndFunction
 
 ; One of the two lines the companion can speak for say: line 2 is the second one, every other number the first
