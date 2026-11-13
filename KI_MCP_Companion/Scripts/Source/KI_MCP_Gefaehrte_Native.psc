@@ -41,3 +41,12 @@ string[] Function GetQuestTargets(int maxQuests, int maxTargets) global native
 ; (negative = left), for a map marker the kind of place as the game numbers it (13 = farm, 21 = stable ...),
 ; for a map marker 1 if the player has been there, name of the place (for a door: of the place it leads to)
 string[] Function GetNearbyPlaces(int radiusMeters, int maxMarkers, int maxDoors) global native
+
+; The function below exists from interface version 4 on
+
+; The things close to the player: furniture first, then containers, then items that lie around, each nearest first,
+; at most maxPerKind of each kind within radiusMeters. Things without a name are left out.
+; One text per thing, its parts separated by tabs: kind (0 = furniture, 1 = container, 2 = item),
+; ref ID as eight hex digits, distance to the player in meters, angle from where the player faces in degrees
+; (negative = left), for furniture 1 if a character can sit on it, for a container 1 if it is locked, name
+string[] Function GetNearbyThings(int radiusMeters, int maxPerKind) global native

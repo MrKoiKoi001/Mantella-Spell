@@ -44,6 +44,10 @@ int Property MaxQuestTargets = 8 AutoReadOnly
 int Property PlaceRadiusMeters = 300 AutoReadOnly
 int Property MaxPlaceMarkers = 6 AutoReadOnly
 int Property MaxPlaceDoors = 6 AutoReadOnly
+; From this interface version on the SKSE plugin knows the things close to the player (furniture, containers, items)
+int Property NativeVersionWithThings = 4 AutoReadOnly
+; Things around the player: how far the plugin looks. They only go to the server when it asked for them
+int Property ThingRadiusMeters = 10 AutoReadOnly
 ; Gold is an item like any other. This is its form ID in Skyrim.esm
 int Property GoldFormId = 0x0000000F AutoReadOnly
 string Property GoldFile = "Skyrim.esm" AutoReadOnly
@@ -63,8 +67,19 @@ int Property HandLeft = 0 AutoReadOnly
 int Property HandRight = 1 AutoReadOnly
 ; Numbers per character in the list "nearby" (see AddNearbyToState)
 int Property ValuesPerNearby = 5 AutoReadOnly
-; For loot: this close to a body the companion can reach what the body carries
-float Property LootReachMeters = 3.0 AutoReadOnly
+; Form types of what a thing in the world is made from (Form.GetType as SKSE numbers them)
+int Property FormTypeContainer = 28 AutoReadOnly
+int Property FormTypeFurniture = 40 AutoReadOnly
+; What Actor.GetSitState returns for a character that sits (0 = not sitting, 2 = about to sit, 4 = about to get up)
+int Property SitStateSeated = 3 AutoReadOnly
+; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
+; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
+int Property ProtocolNumber = 2 AutoReadOnly
+; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
+; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
+; in AddNearbyToState have room for the highest number
+int Property DefaultListLimit = 10 AutoReadOnly
+int Property HighestListLimit = 30 AutoReadOnly
 ; Own event that starts the walk of move_to and loot. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
@@ -91,6 +106,9 @@ string Property KEY_COMMAND_TARGET_LOW = "companion_target_low" AutoReadOnly
 string Property KEY_COMMAND_DETAIL = "companion_detail" AutoReadOnly
 ; For give and take: how many of the item (0 = all of them)
 string Property KEY_COMMAND_COUNT = "companion_count" AutoReadOnly
+; For report_state: 1 if the state should carry the things close to the player. KEY_COMMAND_COUNT then says how many
+; characters (and things of each kind) it should list at most
+string Property KEY_COMMAND_THINGS = "companion_things" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -111,6 +129,7 @@ string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
 string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
 string Property ACTION_LOOT = "loot" AutoReadOnly
+string Property ACTION_SIT = "sit" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -119,9 +138,12 @@ int _pollId = 0
 bool _isContactShown = false
 ; The follower quest of the game, looked up once
 DialogueFollowerScript _followerQuest
-; Whom the companion is walking to at the moment because of move_to or loot (None = nobody)
-Actor _walkTarget
-; loot: the walk that is running leads to a body. What to take there (None = everything),
+; Whom or what the companion is walking to at the moment because of move_to, loot or sit (None = nothing)
+ObjectReference _walkTarget
+; sit: the walk that is running leads to a seat, and the seat the companion took because of sit (None = none)
+bool _isSitWalk = false
+ObjectReference _seat
+; loot: the walk that is running leads to a body or a container. What to take there (None = everything),
 ; and whether the companion followed the player before and should do so again afterwards
 bool _isLootWalk = false
 Form _lootItem
@@ -141,8 +163,12 @@ bool _isHearing = false
 Form _gold
 ; Whose inventory the next state should carry (see INVENTORY_...). Set by a report_state command, used up by BuildState
 string _wantedInventory = ""
-; For INVENTORY_CORPSE: whose body that is
-Actor _wantedCorpse
+; For INVENTORY_CORPSE: whose body or which container that is
+ObjectReference _wantedCorpse
+; What the last report_state command asked for besides: how long the lists may get (0 = it named no number),
+; and whether the things close to the player should go along. Both are used up by BuildState
+int _wantedListLimit = 0
+bool _wantedThings = false
 
 ; --------------------------------------------------------------------- events
 
@@ -162,6 +188,7 @@ Function StartLoop()
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk
     StopFleeing()
     EndWalk()
+    _seat = None
     _nativeVersion = 0
     _isHearing = false
     If SKSE.GetPluginVersion(NativePluginName) != -1
@@ -276,8 +303,8 @@ int Function BuildState()
 
     ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
     ; the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state),
-    ; and whether that plugin listens to what characters say
-    int[] worldValues = new int[4]
+    ; whether that plugin listens to what characters say, and the number of this protocol (see ProtocolNumber)
+    int[] worldValues = new int[5]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -288,6 +315,7 @@ int Function BuildState()
     worldValues[1] = ((gameDays - (gameDays as int)) * MinutesPerDay) as int
     worldValues[2] = _nativeVersion
     worldValues[3] = ToNumber(_isHearing)
+    worldValues[4] = ProtocolNumber
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
 
     ; The open quests of the journal with the texts of their objectives, one text per quest
@@ -310,6 +338,26 @@ int Function BuildState()
         string[] placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors)
         If placeLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "places", placeLines)
+        EndIf
+    EndIf
+
+    ; How long the lists of this state may get
+    int listLimit = _wantedListLimit
+    _wantedListLimit = 0
+    If listLimit < 1
+        listLimit = DefaultListLimit
+    ElseIf listLimit > HighestListLimit
+        listLimit = HighestListLimit
+    EndIf
+    bool areThingsWanted = _wantedThings
+    _wantedThings = false
+
+    ; Only when the server asked for them: the things close to the player (furniture, containers and items that
+    ; lie around), one text per thing (see KI_MCP_Gefaehrte_Native.psc). The plugin goes through them far faster than this script could
+    If areThingsWanted && _nativeVersion >= NativeVersionWithThings
+        string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit)
+        If thingLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "things", thingLines)
         EndIf
     EndIf
 
@@ -368,7 +416,7 @@ int Function BuildState()
     EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
-    AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget)
+    AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget, listLimit)
 
     ; How long collecting took in milliseconds: all of it, and the characters nearby alone.
     ; The AI has to wait this long for every state, so these numbers show where time is lost
@@ -383,9 +431,10 @@ EndFunction
 ; Ref ID, health in percent, dead, in combat, waiting, in the loaded area, distance to the player in meters,
 ; angle from where the player faces to the companion in degrees (negative = left, positive = right),
 ; ref ID of whom the companion fights (0 = nobody), direction the companion faces in degrees (0 = north, 90 = east),
-; retreating because of flee, ref ID of whom the companion is walking to because of move_to or loot (0 = nobody)
+; retreating because of flee, ref ID of whom or what the companion is walking to because of move_to, loot or sit (0 = nothing),
+; sitting as the game tells it (see SitStateSeated)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[12]
+    int[] companionValues = new int[13]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -405,6 +454,7 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     If _walkTarget
         companionValues[11] = _walkTarget.GetFormID()
     EndIf
+    companionValues[12] = companion.GetSitState()
     Return companionValues
 EndFunction
 
@@ -437,11 +487,13 @@ Function AddHandsToState(int stateHandle, Actor companion)
     SKSE_HTTP.setStringArray(stateHandle, "hands", hands)
 EndFunction
 
-; The inventory of the player or of the companion as two lists under keyName and keyName + "_names".
+; The inventory of the player, of the companion, of a body or of a container as two lists under keyName and keyName + "_names".
 ; Numbers: first how many kinds of items there are in all (more than MaxInventoryItems are cut off), then per item
 ; form ID, how many, form type, worn or held (1 or 0). An item without a name (the game hides those) stays all 0.
 ; Names: one text per item, its place in the list of numbers (from 0), a colon and the name
-Function AddInventoryToState(int stateHandle, Actor owner, string keyName)
+Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyName)
+    ; Only a character can wear or hold something
+    Actor ownerActor = owner as Actor
     int totalCount = owner.GetNumItems()
     int itemCount = totalCount
     If itemCount > MaxInventoryItems
@@ -466,8 +518,8 @@ Function AddInventoryToState(int stateHandle, Actor owner, string keyName)
                 itemValues[start] = item.GetFormID()
                 itemValues[start + 1] = owner.GetItemCount(item)
                 itemValues[start + 2] = itemType
-                If itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight
-                    itemValues[start + 3] = ToNumber(owner.IsEquipped(item))
+                If ownerActor && (itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight)
+                    itemValues[start + 3] = ToNumber(ownerActor.IsEquipped(item))
                 EndIf
                 itemNames[index] = (index as string) + ":" + itemName
             EndIf
@@ -478,18 +530,43 @@ Function AddInventoryToState(int stateHandle, Actor owner, string keyName)
     SKSE_HTTP.setStringArray(stateHandle, keyName + "_names", itemNames)
 EndFunction
 
-; What a dead character carries, for loot: its ref ID under "corpse", its name under "corpse_name",
-; and its things under "inventory_corpse" like the other inventories.
-; Nothing at all if there is no such body in the loaded area
-Function AddCorpseToState(int stateHandle, Actor corpse)
-    If !corpse || !corpse.IsDead() || !corpse.Is3DLoaded()
+; What a dead character carries or a container holds, for loot. Three numbers under "corpse": its ref ID,
+; whether it is a container (1) or a body (0), and whether it is locked. Its name under "corpse_name",
+; and its things under "inventory_corpse" like the other inventories (not for a locked container, nobody can look into that).
+; Nothing at all if there is no such body or container in the loaded area
+Function AddCorpseToState(int stateHandle, ObjectReference owner)
+    If !owner || !owner.Is3DLoaded()
         Return
     EndIf
-    int[] corpseValues = new int[1]
-    corpseValues[0] = corpse.GetFormID()
+    Actor ownerActor = owner as Actor
+    bool isContainer = false
+    bool isLocked = false
+    If ownerActor
+        If !ownerActor.IsDead()
+            Return
+        EndIf
+    Else
+        isContainer = IsContainer(owner)
+        If !isContainer
+            Return
+        EndIf
+        isLocked = owner.IsLocked()
+    EndIf
+    int[] corpseValues = new int[3]
+    corpseValues[0] = owner.GetFormID()
+    corpseValues[1] = ToNumber(isContainer)
+    corpseValues[2] = ToNumber(isLocked)
     SKSE_HTTP.setIntArray(stateHandle, "corpse", corpseValues)
-    SetStringSafely(stateHandle, "corpse_name", corpse.GetDisplayName())
-    AddInventoryToState(stateHandle, corpse, "inventory_corpse")
+    SetStringSafely(stateHandle, "corpse_name", owner.GetDisplayName())
+    If !isLocked
+        AddInventoryToState(stateHandle, owner, "inventory_corpse")
+    EndIf
+EndFunction
+
+; Whether a thing in the world is a container (a chest, a barrel, a sack ...)
+bool Function IsContainer(ObjectReference target)
+    Form baseForm = target.GetBaseObject()
+    Return baseForm && baseForm.GetType() == FormTypeContainer
 EndFunction
 
 ; ------------------------------------------------------------------- nearby
@@ -497,12 +574,12 @@ EndFunction
 ; If there are more than fit into the list, the living win over the dead, and among each the closest ones.
 ; The server sorts the list. If nobody is around, the state gets no "nearby" entries at all
 
-Function AddNearbyToState(int stateHandle, Actor player, float playerX, float playerY, float playerZ, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget)
-    ; The length of these two arrays is the highest number of characters that get listed.
-    ; Papyrus only takes a plain number as the length of a new array
-    Actor[] found = new Actor[10]
-    float[] distances = new float[10]
-    bool[] deadFlags = new bool[10]
+Function AddNearbyToState(int stateHandle, Actor player, float playerX, float playerY, float playerZ, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget, int listLimit)
+    ; The length of these arrays is the highest number of characters that can get listed (HighestListLimit),
+    ; listLimit is how many of the places are used this time. Papyrus only takes a plain number as the length of a new array
+    Actor[] found = new Actor[30]
+    float[] distances = new float[30]
+    bool[] deadFlags = new bool[30]
     ; Characters that were looked at and do not belong into the list. Outdoors the same character
     ; is drawn several times, and with this list looking at it again costs no question to the game
     Actor[] rejected = new Actor[20]
@@ -510,20 +587,20 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
     float radius = NearbyRadiusMeters * GameUnitsPerMeter
 
     ; Whoever the companion fights belongs into the list first
-    foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, radius)
+    foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, radius, listLimit)
 
     If playerCell
         int refCount = playerCell.GetNumRefs(FormTypeNpc)
         int refIndex = 0
         While refIndex < refCount
-            foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius)
+            foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius, listLimit)
             refIndex += 1
         EndWhile
 
         If !isInterior
             int sampleIndex = 0
             While sampleIndex < RandomSampleCount
-                foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius)
+                foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius, listLimit)
                 sampleIndex += 1
             EndWhile
         EndIf
@@ -561,7 +638,7 @@ EndFunction
 
 ; Puts the candidate into the list if it is a character in reach, living or dead, that is not listed yet.
 ; Returns the new number of listed characters
-int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius)
+int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius, int listLimit)
     If !candidate || candidate == player || candidate == companion
         Return foundCount
     EndIf
@@ -577,7 +654,7 @@ int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, 
     EndIf
     bool isDead = candidate.IsDead()
 
-    If foundCount < found.Length
+    If foundCount < listLimit
         found[foundCount] = candidate
         distances[foundCount] = distance
         deadFlags[foundCount] = isDead
@@ -635,8 +712,10 @@ int[] Function RunCommands(int[] commandHandles)
             resultCount += 1
         Else
             _wantedInventory = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_DETAIL, "")
+            _wantedListLimit = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_COUNT, 0)
+            _wantedThings = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_THINGS, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
-                _wantedCorpse = GetTargetActor(commandHandles[index])
+                _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
         EndIf
         index += 1
@@ -667,7 +746,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -681,11 +760,15 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = DoItemCommand(companion, actionName, item, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1))
         EndIf
     Else
-        Actor target = None
+        ; A character, or for move_to, loot and sit also a thing in the world
+        ObjectReference target = None
         Form lootItem = None
-        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT
-            target = GetTargetActor(commandHandle)
+        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
+            target = GetTargetForm(commandHandle) as ObjectReference
             resultText = GetTargetProblem(companion, target, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), actionName == ACTION_ATTACK)
+        EndIf
+        If resultText == "" && actionName == ACTION_SIT
+            resultText = GetSitProblem(target)
         EndIf
         If resultText == "" && actionName == ACTION_LOOT
             int itemHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
@@ -697,13 +780,19 @@ int Function RunCommand(int commandHandle, string actionName)
             isOk = true
             ; A loot that gets cut short had made the companion wait, although it was following the player
             bool followAgain = _isLootWalk && _followAfterLoot
-            ; A new command ends what the one before started: the walk of move_to and loot, and the retreat of flee
+            ; A new command ends what the one before started: the walk of move_to, loot and sit, and the retreat of flee
             EndWalk()
             If actionName != ACTION_FLEE
                 StopFleeing()
             EndIf
+            ; Staying where it is and ending a fight are no reasons to get up from a seat
+            If actionName != ACTION_WAIT && actionName != ACTION_STAND_DOWN
+                StandUp(companion)
+            EndIf
             If actionName == ACTION_LOOT
                 resultText = StartLoot(companion, target, lootItem, followAgain)
+            ElseIf actionName == ACTION_SIT
+                resultText = StartSitting(companion, target)
             Else
                 If followAgain && actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_MOVE_TO
                     SetWaiting(companion, false)
@@ -724,7 +813,7 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT
+    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
 EndFunction
 
 bool Function IsItemAction(string actionName)
@@ -732,7 +821,7 @@ bool Function IsItemAction(string actionName)
 EndFunction
 
 ; Does what the command says and returns the text for the AI. Only call this after the command was checked
-string Function DoCommand(Actor companion, string actionName, Actor target)
+string Function DoCommand(Actor companion, string actionName, ObjectReference target)
     If actionName == ACTION_FOLLOW
         SetWaiting(companion, false)
         Return "You follow the player now."
@@ -742,7 +831,8 @@ string Function DoCommand(Actor companion, string actionName, Actor target)
         Return "You wait here now."
     EndIf
     If actionName == ACTION_ATTACK
-        companion.StartCombat(target)
+        ; GetTargetProblem made sure that the target of an attack is a character
+        companion.StartCombat(target as Actor)
         Return "You attack " + target.GetDisplayName() + " now."
     EndIf
     If actionName == ACTION_MOVE_TO
@@ -852,52 +942,74 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
     Return "You give " + count + " " + itemName + " to the player."
 EndFunction
 
-; Returns why the companion cannot attack the target (isAttack) or walk to it, or "" if it can
-string Function GetTargetProblem(Actor companion, Actor target, string targetText, bool isAttack)
+; Returns why the companion cannot attack the target (isAttack) or walk to it, or "" if it can.
+; The target of an attack has to be a character, a walk can also lead to a thing in the world
+string Function GetTargetProblem(Actor companion, ObjectReference target, string targetText, bool isAttack)
     If !target
-        Return "There is no character with the ref_id '" + targetText + "'. Take the ref_id from 'nearby' in STATE."
+        Return "There is nothing with the ref_id '" + targetText + "'. Take the ref_id from 'Nearby' in STATE."
     EndIf
     If target == companion
         Return "That is you yourself."
     EndIf
-    If isAttack && target == Game.GetPlayer()
+    Actor targetActor = target as Actor
+    If isAttack && !targetActor
+        Return target.GetDisplayName() + " is not a character."
+    EndIf
+    If isAttack && targetActor == Game.GetPlayer()
         Return "That is the player. You do not attack the player."
     EndIf
     If !target.Is3DLoaded()
         Return target.GetDisplayName() + " is too far away."
     EndIf
-    If isAttack && target.IsDead()
+    If isAttack && targetActor.IsDead()
         Return target.GetDisplayName() + " is already dead."
     EndIf
     Return ""
 EndFunction
 
 ; ----------------------------------------------------------------------- loot
-; loot: the companion walks to a dead character and takes what it carries: one kind of item or everything.
-; The walk takes time, so the command only starts it. What came of it goes out with the next state (_report)
+; loot: the companion walks to a dead character or to a container (a chest, a barrel ...) and takes what is in it:
+; one kind of item or everything. The walk takes time, so the command only starts it.
+; What came of it goes out with the next state (_report)
+
+; How the texts for the AI call what is looted: "the body of Bandit" or "Chest"
+string Function GetLootName(ObjectReference target)
+    If target as Actor
+        Return "the body of " + target.GetDisplayName()
+    EndIf
+    Return target.GetDisplayName()
+EndFunction
 
 ; Returns why the companion cannot loot the target, or "" if it can.
 ; isItemNamed: the command names one item (None = it named something that is no item), otherwise everything is meant
-string Function GetLootProblem(Actor target, Form item, bool isItemNamed)
-    If !target.IsDead()
-        Return target.GetDisplayName() + " is alive. You can only loot the dead."
+string Function GetLootProblem(ObjectReference target, Form item, bool isItemNamed)
+    Actor targetActor = target as Actor
+    If targetActor
+        If !targetActor.IsDead()
+            Return target.GetDisplayName() + " is alive. You can only loot the dead and containers."
+        EndIf
+    ElseIf !IsContainer(target)
+        Return target.GetDisplayName() + " is neither a dead character nor a container."
+    ElseIf target.IsLocked()
+        Return target.GetDisplayName() + " is locked."
     EndIf
     If isItemNamed
         If !item || (item as ObjectReference)
-            Return "The ID in 'detail' is not an item. Take it from the list STATE gives you for this body (argument 'corpse')."
+            Return "The ID in 'detail' is not an item. Take it from the list STATE gives you for this body or container (argument 'corpse')."
         EndIf
         If target.GetItemCount(item) <= 0
-            Return "The body of " + target.GetDisplayName() + " has no " + item.GetName() + "."
+            Return "There is no " + item.GetName() + " in " + GetLootName(target) + "."
         EndIf
-    ElseIf target.GetNumItems() == 0
+    ElseIf targetActor && target.GetNumItems() == 0
+        ; Only asked for bodies: the game may not have filled a container nobody has opened yet
         Return "The body of " + target.GetDisplayName() + " carries nothing."
     EndIf
     Return ""
 EndFunction
 
-; Sends the companion to the body. Only call this after the command was checked.
+; Sends the companion to the body or container. Only call this after the command was checked.
 ; followAgain: a loot that this one replaces had already made a following companion wait
-string Function StartLoot(Actor companion, Actor corpse, Form item, bool followAgain)
+string Function StartLoot(Actor companion, ObjectReference corpse, Form item, bool followAgain)
     ; Afterwards the companion does again what it did before: follow the player or wait
     _followAfterLoot = followAgain || !IsWaiting(companion)
     ; Waiting comes first, as for move_to
@@ -906,34 +1018,46 @@ string Function StartLoot(Actor companion, Actor corpse, Form item, bool followA
     _lootItem = item
     _walkTarget = corpse
     SendModEvent(EVENT_WALK, "", _walkNumber as float)
-    string what = "everything it carries"
+    string what = "everything in it"
+    If corpse as Actor
+        what = "everything it carries"
+    EndIf
     If item
         what = item.GetName()
     EndIf
-    Return "You walk to the body of " + corpse.GetDisplayName() + " to take " + what + ". Your next STATE tells you what you got."
+    Return "You walk to " + GetLootName(corpse) + " to take " + what + ". Your next STATE tells you what you got."
 EndFunction
 
-; Called when the walk to the body is over. Takes the things if the companion stands close enough
-Function FinishLoot(Actor companion, Actor corpse, Form item, int ownWalkNumber)
-    string corpseName = corpse.GetDisplayName()
-    If !corpse.Is3DLoaded() || companion.GetDistance(corpse) > LootReachMeters * GameUnitsPerMeter
-        AddReport("You did not get to the body of " + corpseName + " and took nothing.")
-        Debug.Notification("AI companion: did not get to the body of " + corpseName)
+; Called when the walk to the body or container is over. The companion takes the things wherever it stands then:
+; how close it got is not checked, because measuring that kept failing in the game although it stood next to the body
+Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownWalkNumber, bool hasArrived)
+    string lootName = GetLootName(corpse)
+    string reportText = ""
+    If corpse.IsDisabled()
+        reportText = "You took nothing: " + lootName + " is gone."
     ElseIf item
         int count = corpse.GetItemCount(item)
         If count > 0
             ; The "true" keeps the game from showing a message
             corpse.RemoveItem(item, count, true, companion)
-            AddReport("You took " + count + " " + item.GetName() + " from the body of " + corpseName + ".")
+            reportText = "You took " + count + " " + item.GetName() + " from " + lootName + "."
         Else
-            AddReport("The body of " + corpseName + " had no " + item.GetName() + " any more.")
+            reportText = "There was no " + item.GetName() + " in " + lootName + " any more."
         EndIf
     Else
         int kindCount = corpse.GetNumItems()
-        ; The last "false": things that belong to a quest stay on the body
+        ; The last "false": things that belong to a quest stay where they are
         corpse.RemoveAllItems(companion, false, false)
-        AddReport("You took everything from the body of " + corpseName + ": " + kindCount + " kinds of items.")
+        If kindCount > 0
+            reportText = "You took everything from " + lootName + ": " + kindCount + " kinds of items."
+        Else
+            reportText = "You went through " + lootName + ". The game listed nothing in it."
+        EndIf
     EndIf
+    If !hasArrived
+        reportText = reportText + " You did not get all the way there."
+    EndIf
+    AddReport(reportText)
     ; A newer command has the last word on following and waiting
     If _followAfterLoot && ownWalkNumber == _walkNumber
         SetWaiting(companion, false)
@@ -949,17 +1073,69 @@ Function AddReport(string reportText)
     EndIf
 EndFunction
 
+; ------------------------------------------------------------------------ sit
+; sit: the companion walks to a piece of furniture and uses it (sits down on a chair or a bench).
+; A character that activates a piece of furniture uses it, and activating it once more is how it leaves it again
+
+; Returns why the companion cannot sit on the target, or "" if it can
+string Function GetSitProblem(ObjectReference seat)
+    Form baseForm = seat.GetBaseObject()
+    If !baseForm || baseForm.GetType() != FormTypeFurniture
+        Return seat.GetDisplayName() + " is nothing to sit on. Take the ref_id of a seat from 'Nearby' in STATE."
+    EndIf
+    If seat.IsFurnitureInUse()
+        Return seat.GetDisplayName() + " is taken."
+    EndIf
+    Return ""
+EndFunction
+
+; Sends the companion to the seat. Only call this after the command was checked
+string Function StartSitting(Actor companion, ObjectReference seat)
+    ; Waiting comes first: a companion that follows the player would get up again at once
+    SetWaiting(companion, true)
+    _isSitWalk = true
+    _walkTarget = seat
+    SendModEvent(EVENT_WALK, "", _walkNumber as float)
+    Return "You walk to " + seat.GetDisplayName() + " and sit down. 'follow' makes you get up and come along again."
+EndFunction
+
+; Called when the walk to the seat is over
+Function FinishSitting(Actor companion, ObjectReference seat, int ownWalkNumber)
+    bool isTaken = seat.IsFurnitureInUse()
+    If ownWalkNumber != _walkNumber
+        ; A newer command has taken over in the meantime
+        Return
+    EndIf
+    If isTaken
+        AddReport("You could not sit down: " + seat.GetDisplayName() + " was taken when you got there.")
+    ElseIf seat.Activate(companion)
+        _seat = seat
+    Else
+        AddReport("You could not sit down on " + seat.GetDisplayName() + ".")
+    EndIf
+EndFunction
+
+; Gets the companion up from the seat it took because of sit
+Function StandUp(Actor companion)
+    ObjectReference seat = _seat
+    _seat = None
+    If seat && companion.GetSitState() == SitStateSeated
+        seat.Activate(companion)
+    EndIf
+EndFunction
+
 ; ----------------------------------------------------------------------- walk
-; move_to: the companion walks to a character and waits there. loot walks the same way, to a body
+; move_to: the companion walks to a character or a thing and waits there. loot and sit walk the same way
 
 ; Raised by DoCommand. numArg is the number of the command that asked for the walk
 Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender)
     int ownWalkNumber = numArg as int
     Actor companion = GetCompanion()
-    Actor walkTarget = _walkTarget
+    ObjectReference walkTarget = _walkTarget
     If ownWalkNumber != _walkNumber || !companion || !walkTarget
         Return
     EndIf
+    bool isSitWalk = _isSitWalk
     bool isLootWalk = _isLootWalk
     Form lootItem = _lootItem
     ; This call only comes back when the companion has arrived, found no way or was sent somewhere else
@@ -972,7 +1148,12 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     If isLootWalk
         _isLootWalk = false
         _lootItem = None
-        FinishLoot(companion, walkTarget, lootItem, ownWalkNumber)
+        FinishLoot(companion, walkTarget, lootItem, ownWalkNumber, hasArrived)
+        Return
+    EndIf
+    If isSitWalk
+        _isSitWalk = false
+        FinishSitting(companion, walkTarget, ownWalkNumber)
         Return
     EndIf
     If !hasArrived
@@ -985,6 +1166,7 @@ EndEvent
 Function EndWalk()
     _walkNumber += 1
     _walkTarget = None
+    _isSitWalk = false
     _isLootWalk = false
     _lootItem = None
 EndFunction
