@@ -1,0 +1,21 @@
+FormKey: 000808:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_LeadQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 100
+NextAliasID: 2
+Aliases:
+- Name: Walker
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000809:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: Leader
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null

@@ -76,7 +76,7 @@ int Property FormTypeFurniture = 40 AutoReadOnly
 int Property SitStateSeated = 3 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 3 AutoReadOnly
+int Property ProtocolNumber = 4 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -118,6 +118,17 @@ int Property SayTopicOneFormId = 0x00000804 AutoReadOnly
 int Property SayTopicTwoFormId = 0x00000806 AutoReadOnly
 ; The quest of this mod the two lines belong to. A character can only speak the lines of a quest that is running
 int Property SayQuestFormId = 0x00000803 AutoReadOnly
+; From this interface version on the SKSE plugin knows where a door leads, and who is in a building the player is not in
+int Property NativeVersionWithDoors = 7 AutoReadOnly
+; Form type of what a door is made from (Form.GetType as SKSE numbers them)
+int Property FormTypeDoor = 29 AutoReadOnly
+; The quest of this mod that makes the companion follow someone else than the player: whoever is in its alias "Walker"
+; gets a package of the game that follows whoever is in its alias "Leader". Built like the sit quest
+int Property LeadQuestFormId = 0x00000808 AutoReadOnly
+int Property LeadAliasWalker = 0 AutoReadOnly
+int Property LeadAliasLeader = 1 AutoReadOnly
+; expression: the looks of the game go from 0 to this number (see Actor.SetExpressionOverride)
+int Property HighestMood = 16 AutoReadOnly
 ; look_at only turns the head, and a head does not turn all the way round. If the target is further to the side
 ; than this many degrees, the body turns as well
 float Property LookTurnDegrees = 70.0 AutoReadOnly
@@ -152,6 +163,8 @@ string Property KEY_COMMAND_THINGS = "companion_things" AutoReadOnly
 ; For report_state: 1 if the lists of the state (characters, things, places, quest targets) should be seen from
 ; the companion instead of from the player
 string Property KEY_COMMAND_AROUND = "companion_around" AutoReadOnly
+; For report_state: 1 if the state should carry the level, the skills and so on of the player (see BuildPlayerStats)
+string Property KEY_COMMAND_STATS = "companion_stats" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -177,6 +190,8 @@ string Property ACTION_SIT = "sit" AutoReadOnly
 string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
 string Property ACTION_GESTURE = "gesture" AutoReadOnly
 string Property ACTION_SAY = "say" AutoReadOnly
+string Property ACTION_ENTER = "enter" AutoReadOnly
+string Property ACTION_EXPRESSION = "expression" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -197,6 +212,17 @@ Quest _sitQuest
 ObjectReference _lookTarget
 ; Whether the companion plays a gesture that may go on until something ends it
 bool _isGesturing = false
+; follow with a target: the quest that makes the companion follow someone else (looked up once), whom it follows
+; (None = the player or nobody), and whether it is in the alias of that quest
+Quest _leadQuest
+Actor _leader
+bool _hasLeader = false
+; enter: the walk that is running leads to a door the companion is to go through, and the door it went through last
+; (None = none). 'follow' brings it back out of that door
+bool _isEnterWalk = false
+ObjectReference _entryDoor
+; expression: how the companion looks because of it, as the AI named it ("" = its own face)
+string _expressionName = ""
 ; How often the walk that is running was started again because the companion did not get going
 int _walkRestartCount = 0
 ; loot: the walk that is running leads to a body or a container. What to take there (None = everything),
@@ -227,6 +253,8 @@ int _wantedListLimit = 0
 bool _wantedThings = false
 ; Whether the last report_state command asked for the lists as the companion sees them. Used up by BuildState
 bool _wantedAround = false
+; Whether it asked for the level, the skills and so on of the player. Used up by BuildState
+bool _wantedStats = false
 
 ; --------------------------------------------------------------------- events
 
@@ -348,13 +376,23 @@ int Function BuildState()
     SetStringSafely(stateHandle, "player_name", player.GetDisplayName())
 
     ; From whom the lists of this state are seen (characters, things, places, quest targets): from the player,
-    ; or from the companion if the server asked for that and the companion stands in the loaded area
+    ; or from the companion if the server asked for that and the companion stands in the loaded area.
+    ; A companion inside a building the player is not in can look around as well, with the help of the SKSE plugin:
+    ; the game has not loaded that building, so there is only what it keeps of it in memory (isRemoteViewer)
     bool isAroundWanted = _wantedAround
     _wantedAround = false
+    bool areStatsWanted = _wantedStats
+    _wantedStats = false
     Actor companion = GetCompanion()
     Actor viewer = player
-    If isAroundWanted && companion && companion.Is3DLoaded()
-        viewer = companion
+    bool isRemoteViewer = false
+    If isAroundWanted && companion
+        If companion.Is3DLoaded()
+            viewer = companion
+        ElseIf _nativeVersion >= NativeVersionWithDoors && IsInOtherInterior(companion, playerCell)
+            viewer = companion
+            isRemoteViewer = true
+        EndIf
     EndIf
     ; A companion that was sent away while it sat would keep sitting for good
     If _seat && !companion
@@ -376,6 +414,14 @@ int Function BuildState()
     playerValues[6] = ToNumber(isInterior)
     playerValues[7] = ToNumber(player.IsWeaponDrawn())
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
+
+    ; Only when the server asked for them: level, skills and so on. They cost about thirty questions to the game
+    If areStatsWanted
+        SKSE_HTTP.setIntArray(stateHandle, "stats_player", BuildPlayerStats(player))
+        If companion
+            SKSE_HTTP.setIntArray(stateHandle, "stats_companion", BuildCompanionStats(companion))
+        EndIf
+    EndIf
 
     ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
     ; the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state),
@@ -460,6 +506,16 @@ int Function BuildState()
                 SetStringSafely(stateHandle, "companion_voice", voiceName)
             EndIf
         EndIf
+        ; Where the companion is if it is not in the loaded area: the name of the building, if the game has one
+        If !companion.Is3DLoaded()
+            Cell companionCell = companion.GetParentCell()
+            If companionCell && companionCell.GetName() != ""
+                SetStringSafely(stateHandle, "companion_place", companionCell.GetName())
+            EndIf
+        EndIf
+        If _expressionName != ""
+            SetStringSafely(stateHandle, "companion_expression", _expressionName)
+        EndIf
         SKSE_HTTP.setIntArray(stateHandle, "companion", BuildCompanionValues(companion, player, companionTarget))
     EndIf
 
@@ -500,7 +556,14 @@ int Function BuildState()
     EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
-    If viewer == player
+    If isRemoteViewer
+        ; The characters in a building that is not loaded cannot be asked anything by a script. The plugin lists them:
+        ; one text per character (see KI_MCP_Gefaehrte_Native.psc)
+        string[] characterLines = KI_MCP_Gefaehrte_Native.GetCharactersInCell(companion, listLimit)
+        If characterLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "nearby_lines", characterLines)
+        EndIf
+    ElseIf viewer == player
         AddNearbyToState(stateHandle, player, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget, listLimit)
     Else
         Cell viewerCell = viewer.GetParentCell()
@@ -526,9 +589,10 @@ EndFunction
 ; ref ID of whom the companion fights (0 = nobody), direction the companion faces in degrees (0 = north, 90 = east),
 ; retreating because of flee, ref ID of whom or what the companion is walking to because of move_to, loot or sit (0 = nothing),
 ; sitting as the game tells it (see SitStateSeated), weapon drawn,
-; ref ID of what the companion looks at because of look_at (0 = nothing in particular)
+; ref ID of what the companion looks at because of look_at (0 = nothing in particular),
+; ref ID of whom the companion follows because of follow with a target (0 = the player or nobody)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[15]
+    int[] companionValues = new int[16]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -553,7 +617,88 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     If _lookTarget
         companionValues[14] = _lookTarget.GetFormID()
     EndIf
+    If _hasLeader && _leader
+        companionValues[15] = _leader.GetFormID()
+    EndIf
     Return companionValues
+EndFunction
+
+; Whether a character is inside a building (or a cave ...) the player is not in. The game has not loaded that place
+bool Function IsInOtherInterior(Actor character, Cell playerCell)
+    If character.Is3DLoaded()
+        Return false
+    EndIf
+    Cell characterCell = character.GetParentCell()
+    If !characterCell
+        Return false
+    EndIf
+    Return characterCell.IsInterior() && characterCell != playerCell
+EndFunction
+
+; ---------------------------------------------------------------------- stats
+; What the player can do, for the AI to talk about. Only on request: every number is a question to the game
+
+; The names of the eighteen skills as the game knows them, in the order the server expects them
+; (PLAYER_SKILLS in src/companion/game_state.py of the Mantella fork)
+string[] Function GetSkillNames()
+    string[] skills = new string[18]
+    skills[0] = "OneHanded"
+    skills[1] = "TwoHanded"
+    skills[2] = "Marksman"
+    skills[3] = "Block"
+    skills[4] = "Smithing"
+    skills[5] = "HeavyArmor"
+    skills[6] = "LightArmor"
+    skills[7] = "Pickpocket"
+    skills[8] = "Lockpicking"
+    skills[9] = "Sneak"
+    skills[10] = "Alchemy"
+    skills[11] = "Speechcraft"
+    skills[12] = "Alteration"
+    skills[13] = "Conjuration"
+    skills[14] = "Destruction"
+    skills[15] = "Illusion"
+    skills[16] = "Restoration"
+    skills[17] = "Enchanting"
+    Return skills
+EndFunction
+
+; Level, health, magicka and stamina as they are now, magicka and stamina in percent, the weight carried and
+; the most that can be carried, perk points not spent yet, the experience gathered in this level and
+; how much it takes to reach the next one, then the eighteen skills (see GetSkillNames)
+int[] Function BuildPlayerStats(Actor player)
+    int[] stats = new int[29]
+    int level = player.GetLevel()
+    stats[0] = level
+    stats[1] = player.GetActorValue("Health") as int
+    stats[2] = player.GetActorValue("Magicka") as int
+    stats[3] = player.GetActorValue("Stamina") as int
+    stats[4] = (player.GetActorValuePercentage("Magicka") * 100.0 + 0.5) as int
+    stats[5] = (player.GetActorValuePercentage("Stamina") * 100.0 + 0.5) as int
+    stats[6] = player.GetActorValue("InventoryWeight") as int
+    stats[7] = player.GetActorValue("CarryWeight") as int
+    stats[8] = Game.GetPerkPoints()
+    stats[9] = Game.GetPlayerExperience() as int
+    stats[10] = Game.GetExperienceForLevel(level) as int
+    string[] skills = GetSkillNames()
+    int index = 0
+    While index < skills.Length
+        stats[11 + index] = player.GetActorValue(skills[index]) as int
+        index += 1
+    EndWhile
+    Return stats
+EndFunction
+
+; Level, health, magicka and stamina as they are now, magicka and stamina in percent
+int[] Function BuildCompanionStats(Actor companion)
+    int[] stats = new int[6]
+    stats[0] = companion.GetLevel()
+    stats[1] = companion.GetActorValue("Health") as int
+    stats[2] = companion.GetActorValue("Magicka") as int
+    stats[3] = companion.GetActorValue("Stamina") as int
+    stats[4] = (companion.GetActorValuePercentage("Magicka") * 100.0 + 0.5) as int
+    stats[5] = (companion.GetActorValuePercentage("Stamina") * 100.0 + 0.5) as int
+    Return stats
 EndFunction
 
 ; ---------------------------------------------------------------- inventory
@@ -814,6 +959,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedListLimit = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_COUNT, 0)
             _wantedThings = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_THINGS, 0) != 0
             _wantedAround = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_AROUND, 0) != 0
+            _wantedStats = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_STATS, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
@@ -846,7 +992,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, look_at, gesture, say, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, enter, loot, sit, look_at, gesture, expression, say, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -882,6 +1028,28 @@ int Function RunCommand(int commandHandle, string actionName)
             companion.Say(sayTopic)
             resultText = "You say it aloud."
         EndIf
+    ElseIf actionName == ACTION_EXPRESSION
+        ; The server knows the looks by name and sends the number of the game in the count (below 0 = the own face again)
+        ; and how strong in percent where loot has the lower half of an item ID
+        int mood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1)
+        string moodName = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        If mood < 0
+            isOk = true
+            companion.ClearExpressionOverride()
+            _expressionName = ""
+            resultText = "Your face is your own again."
+        ElseIf mood > HighestMood
+            resultText = "The game has no look with the number " + mood + "."
+        Else
+            isOk = true
+            int moodStrength = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 100)
+            If moodStrength < 1 || moodStrength > 100
+                moodStrength = 100
+            EndIf
+            companion.SetExpressionOverride(mood, moodStrength)
+            _expressionName = moodName
+            resultText = "You look " + moodName + " now. Your face stays like this until 'expression' with 'none'."
+        EndIf
     ElseIf actionName == ACTION_GESTURE
         ; The server knows the gestures by name and sends the ID of the animation. No ID means: end the gesture
         int gestureHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
@@ -903,12 +1071,26 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not sitting, not walking."
         EndIf
     Else
-        ; A character, or for move_to, loot and sit also a thing in the world
+        ; A character, or for move_to, enter, loot and sit also a thing in the world
         ObjectReference target = None
         Form lootItem = None
-        If actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
+        string targetText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        ; follow with a target means: follow that character instead of the player
+        bool isLeaderNamed = actionName == ACTION_FOLLOW && targetText != ""
+        If isLeaderNamed || actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_ENTER
             target = GetTargetForm(commandHandle) as ObjectReference
-            resultText = GetTargetProblem(companion, target, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), actionName == ACTION_ATTACK)
+            resultText = GetTargetProblem(companion, target, targetText, actionName == ACTION_ATTACK)
+        EndIf
+        If resultText == "" && isLeaderNamed
+            If target == Game.GetPlayer()
+                ; Following the player is what follow without a target does
+                target = None
+            Else
+                resultText = GetLeaderProblem(target)
+            EndIf
+        EndIf
+        If resultText == "" && actionName == ACTION_ENTER
+            resultText = GetEnterProblem(target)
         EndIf
         If resultText == "" && actionName == ACTION_SIT
             resultText = GetSitProblem(target)
@@ -928,6 +1110,10 @@ int Function RunCommand(int commandHandle, string actionName)
             If actionName != ACTION_FLEE
                 StopFleeing()
             EndIf
+            ; A fight does not end following someone: afterwards the companion goes on following that character
+            If actionName != ACTION_ATTACK && actionName != ACTION_STAND_DOWN
+                StopFollowingLeader()
+            EndIf
             ; Staying where it is and ending a fight are no reasons to get up from a seat or to end a gesture
             If actionName != ACTION_WAIT && actionName != ACTION_STAND_DOWN
                 StandUp()
@@ -941,6 +1127,8 @@ int Function RunCommand(int commandHandle, string actionName)
                     SetWaiting(companion, false)
                 EndIf
                 resultText = StartSitting(companion, target)
+            ElseIf actionName == ACTION_ENTER
+                resultText = StartEntering(companion, target)
             Else
                 If followAgain && actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_MOVE_TO
                     SetWaiting(companion, false)
@@ -961,7 +1149,7 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY
+    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY || actionName == ACTION_ENTER || actionName == ACTION_EXPRESSION
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -974,6 +1162,11 @@ EndFunction
 ; Does what the command says and returns the text for the AI. Only call this after the command was checked
 string Function DoCommand(Actor companion, string actionName, ObjectReference target)
     If actionName == ACTION_FOLLOW
+        If target
+            ; GetLeaderProblem made sure that the target is a character
+            Return StartFollowingLeader(companion, target as Actor)
+        EndIf
+        ReturnThroughDoor(companion)
         SetWaiting(companion, false)
         Return "You follow the player now."
     EndIf
@@ -1174,6 +1367,147 @@ string Function GetTargetProblem(Actor companion, ObjectReference target, string
         Return target.GetDisplayName() + " is already dead."
     EndIf
     Return ""
+EndFunction
+
+; --------------------------------------------------------------------- leader
+; follow with a target: the companion follows another character than the player, until the next command that
+; sends it somewhere else. Like sitting, this takes a package of the game: this mod has a quest
+; (KI_MCP_Gefaehrte_LeadQuest) with two aliases. Whoever is put into "Walker" gets a package that follows
+; whoever is in "Leader". Emptying the aliases ends it, and the companion follows the player or waits as before
+
+Quest Function GetLeadQuest()
+    If !_leadQuest
+        _leadQuest = Game.GetFormFromFile(LeadQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    ; The quest starts with the game. In a save from before it existed it may not be running yet
+    If _leadQuest && !_leadQuest.IsRunning()
+        _leadQuest.Start()
+    EndIf
+    Return _leadQuest
+EndFunction
+
+; One of the two aliases of that quest (LeadAliasWalker or LeadAliasLeader), or None if the quest is missing
+ReferenceAlias Function GetLeadAlias(int aliasId)
+    Quest leadQuest = GetLeadQuest()
+    If !leadQuest
+        Return None
+    EndIf
+    Return leadQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; Returns why the companion cannot follow the target, or "" if it can
+string Function GetLeaderProblem(ObjectReference target)
+    Actor leader = target as Actor
+    If !leader
+        Return target.GetDisplayName() + " is not a character. You can only follow characters."
+    EndIf
+    If leader.IsDead()
+        Return target.GetDisplayName() + " is dead."
+    EndIf
+    If !GetLeadAlias(LeadAliasWalker) || !GetLeadAlias(LeadAliasLeader)
+        Return "The game mod is missing its quest for following someone. The mod has to be built and installed again."
+    EndIf
+    Return ""
+EndFunction
+
+; Only call this after the command was checked
+string Function StartFollowingLeader(Actor companion, Actor leader)
+    GetLeadAlias(LeadAliasLeader).ForceRefTo(leader)
+    GetLeadAlias(LeadAliasWalker).ForceRefTo(companion)
+    ; Without this the companion only notices its new package when the game next rethinks what it does
+    companion.EvaluatePackage()
+    _leader = leader
+    _hasLeader = true
+    Return "You follow " + leader.GetDisplayName() + " now, wherever that character goes. 'follow' without a target brings you back to the player."
+EndFunction
+
+; Empties the aliases of that quest. Whoever was the walker loses the package
+Function StopFollowingLeader()
+    If !_hasLeader
+        Return
+    EndIf
+    _hasLeader = false
+    _leader = None
+    ReferenceAlias walkerAlias = GetLeadAlias(LeadAliasWalker)
+    ReferenceAlias leaderAlias = GetLeadAlias(LeadAliasLeader)
+    If !walkerAlias || !leaderAlias
+        Return
+    EndIf
+    Actor walker = walkerAlias.GetActorReference()
+    walkerAlias.Clear()
+    leaderAlias.Clear()
+    If walker
+        walker.EvaluatePackage()
+    EndIf
+EndFunction
+
+; ---------------------------------------------------------------------- enter
+; enter: the companion walks to a door that leads into another area (a building, a cave, out of town) and goes
+; through it on its own. It waits on the other side. The player stays where they are, so the game does not load
+; what is behind the door: the companion is there, but only the SKSE plugin can tell what the game keeps of that place.
+; A script cannot make a character use a door, so the plugin tells where the door leads and the script puts the companion there
+
+; Returns why the companion cannot go through the target, or "" if it can
+string Function GetEnterProblem(ObjectReference door)
+    Form baseForm = door.GetBaseObject()
+    If !baseForm || baseForm.GetType() != FormTypeDoor
+        Return door.GetDisplayName() + " is not a door. Take the ref_id from 'Doors' in STATE."
+    EndIf
+    If _nativeVersion < NativeVersionWithDoors
+        Return "Going through doors needs the newest plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 7)."
+    EndIf
+    If door.IsLocked()
+        Return "That door is locked."
+    EndIf
+    If !KI_MCP_Gefaehrte_Native.GetDoorDestination(door)
+        Return "That door does not lead into another area. Take the ref_id from 'Doors' in STATE."
+    EndIf
+    Return ""
+EndFunction
+
+; Sends the companion to the door. Only call this after the command was checked
+string Function StartEntering(Actor companion, ObjectReference door)
+    ; Waiting comes first, as for move_to: the companion is to stay on the other side
+    SetWaiting(companion, true)
+    _isEnterWalk = true
+    _walkTarget = door
+    StartWalk()
+    Return "You walk to the door and go through it. Your next STATE tells you where you are then. You wait there until 'follow'."
+EndFunction
+
+; Called when the walk to the door is over: puts the companion where someone stands who has gone through that door
+Function FinishEntering(Actor companion, ObjectReference door)
+    ObjectReference destination = KI_MCP_Gefaehrte_Native.GetDoorDestination(door)
+    float[] arrival = KI_MCP_Gefaehrte_Native.GetDoorArrival(door)
+    If !destination || arrival.Length < 4
+        AddReport("You could not go through the door: the game does not tell where it leads.")
+        Return
+    EndIf
+    ; The plugin gives the place of arrival as seen from the door on the other side, and the direction faced there
+    companion.MoveTo(destination, arrival[0], arrival[1], arrival[2], false)
+    companion.SetAngle(0.0, 0.0, arrival[3])
+    _entryDoor = door
+    string placeName = ""
+    Cell destinationCell = destination.GetParentCell()
+    If destinationCell
+        placeName = destinationCell.GetName()
+    EndIf
+    If placeName == ""
+        placeName = "the other side"
+    Else
+        placeName = "'" + placeName + "'"
+    EndIf
+    AddReport("You went through the door and wait in " + placeName + ". The player is not there, so you only see what the game still knows of the place: ask STATE with around 'you'. 'follow' brings you back out to the player.")
+EndFunction
+
+; follow: a companion that went through a door on its own comes back out of that door, if the player is still near it.
+; Otherwise it finds its way like every follower of the game
+Function ReturnThroughDoor(Actor companion)
+    ObjectReference door = _entryDoor
+    _entryDoor = None
+    If door && !companion.Is3DLoaded() && door.Is3DLoaded()
+        companion.MoveTo(door)
+    EndIf
 EndFunction
 
 ; ----------------------------------------------------------------------- loot
@@ -1409,6 +1743,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         Return
     EndIf
     bool isLootWalk = _isLootWalk
+    bool isEnterWalk = _isEnterWalk
     Form lootItem = _lootItem
     ; The command has just told the companion to wait. The game gets a moment to be done with that,
     ; because a walk that was started right away sometimes never began
@@ -1429,6 +1764,12 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         FinishLoot(companion, walkTarget, lootItem, ownWalkNumber, hasArrived)
         Return
     EndIf
+    If isEnterWalk && hasArrived
+        _isEnterWalk = false
+        FinishEntering(companion, walkTarget)
+        Return
+    EndIf
+    _isEnterWalk = false
     If !hasArrived
         AddReport("You did not get to " + walkTarget.GetDisplayName() + ".")
         Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
@@ -1481,6 +1822,12 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         FinishLoot(companion, walkTarget, lootItem, _walkNumber, false)
         Return
     EndIf
+    If _isEnterWalk
+        ; The walk never started. The companion goes through the door from where it stands
+        _isEnterWalk = false
+        FinishEntering(companion, walkTarget)
+        Return
+    EndIf
     AddReport("You did not get going towards " + walkTarget.GetDisplayName() + ". Try 'move_to' again, or 'follow'.")
     Debug.Notification("AI companion: did not get going towards " + walkTarget.GetDisplayName())
 EndEvent
@@ -1491,6 +1838,7 @@ Function EndWalk()
     _walkTarget = None
     _isSitWalk = false
     _isLootWalk = false
+    _isEnterWalk = false
     _lootItem = None
     _walkRestartCount = 0
 EndFunction

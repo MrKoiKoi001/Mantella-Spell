@@ -60,3 +60,22 @@ string[] Function GetNearbyThings(int radiusMeters, int maxPerKind, Actor origin
 ; (eg FemaleEvenToned). The game looks for the sound of what a character says in a folder of that name.
 ; Empty if the character has no voice
 string Function GetVoiceTypeName(Actor target) global native
+
+; The three functions below exist from interface version 7 on
+
+; The door on the other side of a door that leads into another area (a building, a cave, out of town),
+; or None if this is no such door
+ObjectReference Function GetDoorDestination(ObjectReference door) global native
+
+; Where someone stands after going through such a door, measured from the door on the other side (GetDoorDestination):
+; how far to the east, to the north and upwards in game units, and the direction faced in degrees (0 = north, 90 = east).
+; Empty if this is no such door
+float[] Function GetDoorArrival(ObjectReference door) global native
+
+; The characters in the building the character "origin" is in while the player is somewhere else, nearest first,
+; at most maxCharacters. The game has not loaded such a building, so these are only the ones it keeps in memory:
+; as a rule the named characters who live there, not bandits and animals. One text per character, its parts separated
+; by tabs: ref ID as eight hex digits, distance to origin in meters, angle from where origin faces in degrees
+; (negative = left), dead (1 or 0), name. Empty if origin is not in such a place.
+; In the same situation GetQuestTargets, GetNearbyPlaces and GetNearbyThings also work with what the game keeps in memory
+string[] Function GetCharactersInCell(Actor origin, int maxCharacters) global native
