@@ -18,6 +18,10 @@ string Property FollowerQuestFile = "Skyrim.esm" AutoReadOnly
 float Property GameUnitsPerMeter = 70.0 AutoReadOnly
 ; Characters within this distance of the player are listed for the server
 float Property NearbyRadiusMeters = 50.0 AutoReadOnly
+; From interface version 11 on the SKSE plugin lists the characters of the whole loaded area (GetCharactersAround).
+; With it, "Nearby" reaches this far outdoors, so that archers on a tower and game far off are in the list
+int Property NativeVersionWithAround = 11 AutoReadOnly
+float Property NearbyOutdoorRadiusMeters = 200.0 AutoReadOnly
 ; Outdoors the world is cut into cells, and only the cell the player stands in can be listed completely.
 ; To also catch characters in the cells next to it, this many random characters in reach are drawn in addition
 int Property RandomSampleCount = 12 AutoReadOnly
@@ -93,9 +97,18 @@ int Property FormTypeSoulGem = 52 AutoReadOnly
 int Property FormTypeFurniture = 40 AutoReadOnly
 ; What Actor.GetSitState returns for a character that sits (0 = not sitting, 2 = about to sit, 4 = about to get up)
 int Property SitStateSeated = 3 AutoReadOnly
+; sheathe: the game setting that says within how many game units followers draw their weapons when the player does
+; (0 = they do not), and what the game sets it to on its own
+string Property DrawWithPlayerSetting = "fAIDistanceTeammateDrawWeapon" AutoReadOnly
+float Property DrawWithPlayerUnits = 2000.0 AutoReadOnly
+; open and close: how far away a door may be for the companion to reach it, and what GetOpenState tells
+; for a door that is open or just opening
+int Property DoorReachMeters = 5 AutoReadOnly
+int Property OpenStateOpen = 1 AutoReadOnly
+int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 6 AutoReadOnly
+int Property ProtocolNumber = 7 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -222,6 +235,8 @@ string Property KEY_COMMAND_VISIBLE = "companion_visible" AutoReadOnly
 string Property KEY_COMMAND_SPACE = "companion_space" AutoReadOnly
 ; For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
 string Property KEY_COMMAND_FIND = "companion_find" AutoReadOnly
+; say: the animation event that moves the hands of the companion while it talks ("" = none)
+string Property KEY_COMMAND_TALK = "companion_talk" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -253,6 +268,10 @@ string Property ACTION_MAKE_ROOM = "make_room" AutoReadOnly
 string Property ACTION_FACE = "face" AutoReadOnly
 string Property ACTION_MOVE = "move" AutoReadOnly
 string Property ACTION_PICK_UP = "pick_up" AutoReadOnly
+string Property ACTION_SHEATHE = "sheathe" AutoReadOnly
+string Property ACTION_DRAW = "draw" AutoReadOnly
+string Property ACTION_OPEN = "open" AutoReadOnly
+string Property ACTION_CLOSE = "close" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -349,6 +368,10 @@ bool _wantedSpace = false
 string _wantedFind = ""
 ; While BuildState collects the characters nearby: whether only those the viewer can see go into the list
 bool _isVisibleOnlyScan = false
+; sheathe: the companion keeps its weapon put away although the player draws one, and what the game setting
+; for drawing with the player was before (0 = not read yet)
+bool _keepsWeaponAway = false
+float _drawWithPlayerUnits = 0.0
 
 ; --------------------------------------------------------------------- events
 
@@ -372,6 +395,10 @@ Function StartLoop()
     StopFleeing()
     EndWalk()
     _isGesturing = false
+    ; The game forgets a changed game setting when it is closed. So what sheathe set is set again after loading
+    If _keepsWeaponAway
+        Game.SetGameSettingFloat(DrawWithPlayerSetting, 0.0)
+    EndIf
     _nativeVersion = 0
     _isHearing = false
     If SKSE.GetPluginVersion(NativePluginName) != -1
@@ -500,11 +527,12 @@ int Function BuildState()
     EndIf
 
     ; Health in percent, in combat, position x, y and z in game units,
-    ; direction the player faces in degrees (0 = north, 90 = east), indoors, weapon drawn
+    ; direction the player faces in degrees (0 = north, 90 = east), indoors, weapon drawn,
+    ; sitting and sleeping as the game tells them (3 = seated, 3 = asleep, see GetSitState and GetSleepState)
     float playerX = player.GetPositionX()
     float playerY = player.GetPositionY()
     float playerZ = player.GetPositionZ()
-    int[] playerValues = new int[8]
+    int[] playerValues = new int[10]
     playerValues[0] = GetHealthPercent(player)
     playerValues[1] = ToNumber(player.IsInCombat())
     playerValues[2] = playerX as int
@@ -513,6 +541,8 @@ int Function BuildState()
     playerValues[5] = player.GetAngleZ() as int
     playerValues[6] = ToNumber(isInterior)
     playerValues[7] = ToNumber(player.IsWeaponDrawn())
+    playerValues[8] = player.GetSitState()
+    playerValues[9] = player.GetSleepState()
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; Only when the server asked for them: level, skills and so on. They cost about thirty questions to the game
@@ -724,9 +754,10 @@ EndFunction
 ; retreating because of flee, ref ID of whom or what the companion is walking to because of move_to, loot or sit (0 = nothing),
 ; sitting as the game tells it (see SitStateSeated), weapon drawn,
 ; ref ID of what the companion looks at because of look_at (0 = nothing in particular),
-; ref ID of whom the companion follows because of follow with a target (0 = the player or nobody)
+; ref ID of whom the companion follows because of follow with a target (0 = the player or nobody),
+; keeps its weapon put away because of sheathe
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[16]
+    int[] companionValues = new int[17]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -758,6 +789,7 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     If _hasLeader && _leader
         companionValues[15] = _leader.GetFormID()
     EndIf
+    companionValues[16] = ToNumber(_keepsWeaponAway)
     Return companionValues
 EndFunction
 
@@ -967,11 +999,37 @@ Function AddNearbyToState(int stateHandle, Actor player, Actor viewer, float vie
     Actor[] rejected = new Actor[20]
     int foundCount = 0
     float radius = NearbyRadiusMeters * GameUnitsPerMeter
+    ; Outdoors the plugin lists the characters of the whole loaded area, hostile ones first. The script alone only
+    ; reaches the cell the viewer stands in (about 60 meters wide) and a few characters picked at random
+    bool isWideScan = !isInterior && _nativeVersion >= NativeVersionWithAround
+    If isWideScan
+        radius = NearbyOutdoorRadiusMeters * GameUnitsPerMeter
+    EndIf
 
     ; Whoever the companion fights belongs into the list first
     foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, viewer, radius, listLimit)
 
-    If viewerCell
+    If isWideScan
+        ; The companion may be among them, and with 'visible' some drop out again: so more are fetched than fit
+        int aroundCount = listLimit + 1
+        If _isVisibleOnlyScan
+            aroundCount = HighestListLimit * 2
+        EndIf
+        Actor[] around = KI_MCP_Gefaehrte_Native.GetCharactersAround(viewer, NearbyOutdoorRadiusMeters as int, aroundCount)
+        int aroundIndex = 0
+        While aroundIndex < around.Length && foundCount < listLimit
+            Actor aroundActor = around[aroundIndex]
+            If aroundActor && aroundActor != player && aroundActor != companion && found.Find(aroundActor) < 0
+                If !_isVisibleOnlyScan || CanSee(viewer, player, aroundActor)
+                    found[foundCount] = aroundActor
+                    distances[foundCount] = aroundActor.GetDistance(viewer)
+                    deadFlags[foundCount] = aroundActor.IsDead()
+                    foundCount += 1
+                EndIf
+            EndIf
+            aroundIndex += 1
+        EndWhile
+    ElseIf viewerCell
         int refCount = viewerCell.GetNumRefs(FormTypeNpc)
         int refIndex = 0
         While refIndex < refCount
@@ -1152,7 +1210,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -1196,7 +1254,49 @@ int Function RunCommand(int commandHandle, string actionName)
                 Debug.Notification(companion.GetDisplayName() + ": " + sayWords)
             EndIf
             companion.Say(sayTopic)
+            ; Hands that move while talking: the server names an animation event of the game for it ("" = none).
+            ; Only while the companion stands around, so that it does not get in the way of walking, fighting or sitting
+            string talkEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
+            If talkEvent != "" && !_walkTarget && !_isGesturing && !companion.IsInCombat() && !companion.IsWeaponDrawn() && companion.GetSitState() == 0
+                Debug.SendAnimationEvent(companion, talkEvent)
+            EndIf
             resultText = "You say it aloud."
+        EndIf
+    ElseIf actionName == ACTION_SHEATHE
+        ; A follower draws its weapon whenever the player draws one. sheathe switches that off and puts the weapon away
+        If companion.IsInCombat()
+            resultText = "You are fighting, so your weapon stays in your hand. 'stand_down' ends the fight first."
+        Else
+            isOk = true
+            SetDrawingWithPlayer(false)
+            If companion.IsWeaponDrawn()
+                companion.SheatheWeapon()
+                resultText = "You put your weapon away. It stays away even when the player draws a weapon, until 'draw'. In a fight you draw it all the same."
+            Else
+                resultText = "Your weapon is put away already. It now stays away even when the player draws a weapon, until 'draw'. In a fight you draw it all the same."
+            EndIf
+        EndIf
+    ElseIf actionName == ACTION_DRAW
+        isOk = true
+        SetDrawingWithPlayer(true)
+        companion.DrawWeapon()
+        resultText = "You draw your weapon. From now on you draw it and put it away together with the player again."
+    ElseIf actionName == ACTION_OPEN || actionName == ACTION_CLOSE
+        ; A door that only opens and closes (the door of a room, a gate). Without a target it is the door nearest to the companion
+        string doorText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        ObjectReference doorTarget = GetTargetForm(commandHandle) as ObjectReference
+        If doorText == ""
+            doorTarget = FindNearestDoor(companion)
+        EndIf
+        resultText = GetDoorProblem(companion, doorTarget, doorText, actionName == ACTION_OPEN)
+        If resultText == ""
+            isOk = true
+            doorTarget.SetOpen(actionName == ACTION_OPEN)
+            If actionName == ACTION_OPEN
+                resultText = "You open the door."
+            Else
+                resultText = "You close the door."
+            EndIf
         EndIf
     ElseIf actionName == ACTION_EXPRESSION
         ; The server knows the looks by name and sends the number of the game in the count (below 0 = the own face again)
@@ -1391,6 +1491,9 @@ bool Function IsKnownAction(string actionName)
         Return true
     EndIf
     If actionName == ACTION_FACE || actionName == ACTION_MOVE || actionName == ACTION_PICK_UP
+        Return true
+    EndIf
+    If actionName == ACTION_SHEATHE || actionName == ACTION_DRAW || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -1615,6 +1718,101 @@ Topic Function GetSayTopic(int lineNumber)
         Return Game.GetFormFromFile(SayTopicTwoFormId, OwnPluginFile) as Topic
     EndIf
     Return Game.GetFormFromFile(SayTopicOneFormId, OwnPluginFile) as Topic
+EndFunction
+
+; sheathe and draw: switches on or off that followers draw their weapons when the player draws one.
+; That is a setting of the game for all followers, and the companion is the one follower there is
+Function SetDrawingWithPlayer(bool shouldDraw)
+    If shouldDraw
+        If _drawWithPlayerUnits > 0.0
+            Game.SetGameSettingFloat(DrawWithPlayerSetting, _drawWithPlayerUnits)
+        Else
+            Game.SetGameSettingFloat(DrawWithPlayerSetting, DrawWithPlayerUnits)
+        EndIf
+    Else
+        ; Another mod may have set its own distance, so what was there is kept for draw
+        float unitsBefore = Game.GetGameSettingFloat(DrawWithPlayerSetting)
+        If unitsBefore > 0.0
+            _drawWithPlayerUnits = unitsBefore
+        EndIf
+        Game.SetGameSettingFloat(DrawWithPlayerSetting, 0.0)
+    EndIf
+    _keepsWeaponAway = !shouldDraw
+EndFunction
+
+; open and close without a target: the door nearest to the companion in the cell it stands in, or None
+ObjectReference Function FindNearestDoor(Actor companion)
+    Cell ownCell = companion.GetParentCell()
+    If !ownCell
+        Return None
+    EndIf
+    ObjectReference nearestDoor = None
+    float nearestDistance = 0.0
+    int doorCount = ownCell.GetNumRefs(FormTypeDoor)
+    int doorIndex = 0
+    While doorIndex < doorCount
+        ObjectReference candidate = ownCell.GetNthRef(doorIndex, FormTypeDoor)
+        If candidate && !candidate.IsDisabled()
+            float candidateDistance = candidate.GetDistance(companion)
+            If !nearestDoor || candidateDistance < nearestDistance
+                nearestDoor = candidate
+                nearestDistance = candidateDistance
+            EndIf
+        EndIf
+        doorIndex += 1
+    EndWhile
+    Return nearestDoor
+EndFunction
+
+; Returns why the companion cannot open (shouldOpen) or close this door, or "" if it can.
+; doorText is the ref_id the AI named, "" if it named none and the nearest door was looked up
+string Function GetDoorProblem(Actor companion, ObjectReference doorRef, string doorText, bool shouldOpen)
+    If !doorRef
+        If doorText == ""
+            Return "There is no door in the part of the world you stand in. Walk closer to the door first, or name it by its ref_id."
+        EndIf
+        Return "There is nothing with the ref_id '" + doorText + "'."
+    EndIf
+    Form baseForm = doorRef.GetBaseObject()
+    If !baseForm || baseForm.GetType() != FormTypeDoor
+        Return doorRef.GetDisplayName() + " is not a door."
+    EndIf
+    If !companion.Is3DLoaded() || !doorRef.Is3DLoaded()
+        Return "That door is not where you are."
+    EndIf
+    ; A door into another area is gone through, it has nothing that swings open
+    If _nativeVersion >= NativeVersionWithDoors && KI_MCP_Gefaehrte_Native.GetDoorDestination(doorRef)
+        Return "That door leads into another place (ref_id " + GetRefIdText(doorRef) + "). 'enter' takes you through it."
+    EndIf
+    float doorDistance = doorRef.GetDistance(companion)
+    If doorDistance > DoorReachMeters * GameUnitsPerMeter
+        Return "The door is " + ToMeters(doorDistance) + " meters away from you, too far to reach. Walk to it first: move_to with the target " + GetRefIdText(doorRef) + ". Then try again."
+    EndIf
+    int openState = doorRef.GetOpenState()
+    bool isOpen = openState == OpenStateOpen || openState == OpenStateOpening
+    If shouldOpen && isOpen
+        Return "That door is open already."
+    EndIf
+    If !shouldOpen && !isOpen
+        Return "That door is closed already."
+    EndIf
+    If shouldOpen && doorRef.IsLocked()
+        Return "That door is locked."
+    EndIf
+    Return ""
+EndFunction
+
+; The ref ID of something the way the AI names it: eight hex digits
+string Function GetRefIdText(ObjectReference target)
+    string hexDigits = "0123456789ABCDEF"
+    int idNumber = target.GetFormID()
+    string idText = ""
+    int bitShift = 28
+    While bitShift >= 0
+        idText += StringUtil.Substring(hexDigits, Math.LogicalAnd(Math.RightShift(idNumber, bitShift), 15), 1)
+        bitShift -= 4
+    EndWhile
+    Return idText
 EndFunction
 
 ; Ends a gesture that may still be running

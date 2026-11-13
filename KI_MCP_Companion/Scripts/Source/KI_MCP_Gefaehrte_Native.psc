@@ -114,3 +114,11 @@ int[] Function GetSurroundings(Actor origin, int rangeMeters) global native
 ; lines of GetNearbyThings: kind (0 = a character, 1 = a door, 2 = a map marker, 3 = a thing), ref ID, distance in meters,
 ; angle in degrees (negative = left), for a character 1 if it is dead (0 otherwise), name (for a door: of the place it leads to)
 string[] Function FindByName(string text, int maxResults, Actor origin) global native
+
+; The function below exists from interface version 11 on
+
+; The characters in the loaded area around the character "origin" (None or far away outdoors = the player) within
+; radiusMeters, at most maxCharacters: first the living that are hostile to the player, then the other living, then
+; the dead, each nearest first. People and animals alike, without the player and without origin.
+; For "Nearby" outdoors, where a script only reaches the characters of the one cell it stands in
+Actor[] Function GetCharactersAround(Actor origin, int radiusMeters, int maxCharacters) global native
