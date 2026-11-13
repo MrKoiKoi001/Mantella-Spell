@@ -49,7 +49,7 @@ SILENCE_SAMPLE_RATE = 22050
 SILENCE_SECONDS = 0.2
 
 DEFAULT_CREATION_KIT_FOLDER = r"F:\SteamLibrary\steamapps\common\skyrim"
-DEFAULT_GAME_FOLDER = r"C:\Program Files (x86)\Steam\steamapps\common\SkyrimVR"
+DEFAULT_GAME_FOLDER = r"F:\SteamLibrary\steamapps\common\SkyrimVR"
 # Folder below %LOCALAPPDATA% in which the game keeps plugins.txt
 DEFAULT_APPDATA_NAME = "Skyrim VR"
 

@@ -53,6 +53,10 @@ int Property ThingRadiusMeters = 10 AutoReadOnly
 ; From this interface version on the SKSE plugin knows the traps, the arrows that were shot, the surroundings by rays,
 ; and can show what the companion really says as the subtitle of its line
 int Property NativeVersionWithRays = 9 AutoReadOnly
+; From this interface version on the SKSE plugin finds characters, doors, map markers and things by their name
+int Property NativeVersionWithFind = 10 AutoReadOnly
+; At most this many matches of such a search go to the server
+int Property MaxFound = 8 AutoReadOnly
 ; Traps around the viewer: how far the plugin looks and how many go to the server. They go along with every state
 int Property TrapRadiusMeters = 15 AutoReadOnly
 int Property MaxTraps = 6 AutoReadOnly
@@ -128,6 +132,17 @@ int Property RoomDefaultMeters = 3 AutoReadOnly
 int Property RoomHighestMeters = 10 AutoReadOnly
 ; make_room: a companion that has moved less than this far has not made room
 float Property RoomMovedUnits = 70.0 AutoReadOnly
+; make_room: if the way is blocked, the companion tries this many other directions on its own (first a quarter turn
+; to the left of the one it was sent, then the opposite of that)
+int Property RoomOtherTries = 2 AutoReadOnly
+; make_room: a companion that follows the player waits this long at the new spot before it follows again.
+; Otherwise it would come straight back to where it was in the way
+float Property RoomHoldSeconds = 10.0 AutoReadOnly
+; move_to: how far in front of a character the companion stops if the server names no distance, the furthest it may
+; be told to keep, and how much closer than that still counts as being there already
+int Property MoveToPersonMeters = 2 AutoReadOnly
+int Property MoveToHighestKeepMeters = 10 AutoReadOnly
+float Property MoveToNearEnoughUnits = 35.0 AutoReadOnly
 ; move: how far the companion walks if the server names no distance, and the furthest it may be sent.
 ; A companion that stopped more than MoveShortUnits before the spot tells the AI so
 int Property MoveDefaultMeters = 5 AutoReadOnly
@@ -205,6 +220,8 @@ string Property KEY_COMMAND_STATS = "companion_stats" AutoReadOnly
 string Property KEY_COMMAND_VISIBLE = "companion_visible" AutoReadOnly
 ; For report_state: 1 if the state should carry what the rays of the plugin find around the companion
 string Property KEY_COMMAND_SPACE = "companion_space" AutoReadOnly
+; For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
+string Property KEY_COMMAND_FIND = "companion_find" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
@@ -273,6 +290,17 @@ bool _isRoomWalk = false
 ObjectReference _roomMarker
 float _roomStartX = 0.0
 float _roomStartY = 0.0
+; make_room: the step the companion is trying at the moment (to the east and to the north, together of the length 1),
+; how far it should go, and how many other directions it has tried because the way was blocked
+float _roomStepX = 0.0
+float _roomStepY = 0.0
+float _roomUnits = 0.0
+int _roomTryCount = 0
+; make_room: the companion was following the player and only waits until it has made room and stood there for a while
+bool _isRoomHold = false
+; move_to with a distance: the walk leads to the marker, which stands in front of this character or thing.
+; It is what the state and the reports name as the target of the walk (None = the target of the walk itself)
+ObjectReference _walkShownTarget
 ; move: the walk to the marker is one of move (the companion waits where it ends), and how far it was sent
 bool _isMoveWalk = false
 float _moveWantedUnits = 0.0
@@ -317,6 +345,8 @@ bool _wantedStats = false
 bool _wantedVisible = false
 ; Whether it asked for what the rays find around the companion. Used up by BuildState
 bool _wantedSpace = false
+; The name it asked to look for in the whole loaded area ("" = none). Used up by BuildState
+string _wantedFind = ""
 ; While BuildState collects the characters nearby: whether only those the viewer can see go into the list
 bool _isVisibleOnlyScan = false
 
@@ -451,6 +481,8 @@ int Function BuildState()
     _wantedVisible = false
     bool isSpaceWanted = _wantedSpace
     _wantedSpace = false
+    string findText = _wantedFind
+    _wantedFind = ""
     Actor companion = GetCompanion()
     Actor viewer = player
     bool isRemoteViewer = false
@@ -554,6 +586,16 @@ int Function BuildState()
         string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit, viewer)
         If thingLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "things", thingLines)
+        EndIf
+    EndIf
+
+    ; Only when the server asked for it: what in the whole loaded area carries a name, seen from the viewer.
+    ; The text that was looked for goes back as well, so that the server can tell "nothing found" from "could not look"
+    If findText != "" && _nativeVersion >= NativeVersionWithFind
+        string[] foundLines = KI_MCP_Gefaehrte_Native.FindByName(findText, MaxFound, viewer)
+        SetStringSafely(stateHandle, "found_for", findText)
+        If foundLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "found", foundLines)
         EndIf
     EndIf
 
@@ -701,8 +743,11 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[8] = companionTarget.GetFormID()
     EndIf
     companionValues[10] = ToNumber(_fleeingActor == companion)
-    ; The marker of make_room is nothing the AI could name, so that walk is not told
-    If _walkTarget && !_isRoomWalk
+    ; The marker of make_room and move is nothing the AI could name, so that walk is not told.
+    ; For move_to with a distance the marker stands for the one it was put in front of
+    If _walkShownTarget
+        companionValues[11] = _walkShownTarget.GetFormID()
+    ElseIf _walkTarget && !_isRoomWalk
         companionValues[11] = _walkTarget.GetFormID()
     EndIf
     companionValues[12] = companion.GetSitState()
@@ -1074,6 +1119,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedStats = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_STATS, 0) != 0
             _wantedVisible = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_VISIBLE, 0) != 0
             _wantedSpace = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE, 0) != 0
+            _wantedFind = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_FIND, "")
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
@@ -1293,7 +1339,7 @@ int Function RunCommand(int commandHandle, string actionName)
         If resultText == ""
             isOk = true
             ; A loot that gets cut short had made the companion wait, although it was following the player
-            bool followAgain = _isLootWalk && _followAfterLoot
+            bool followAgain = TakeFollowAgain()
             ; A new command ends what the one before started: the walk of move_to, loot and sit, and the retreat of flee
             EndWalk()
             If actionName != ACTION_FLEE
@@ -1318,6 +1364,9 @@ int Function RunCommand(int commandHandle, string actionName)
                 resultText = StartSitting(companion, target)
             ElseIf actionName == ACTION_ENTER
                 resultText = StartEntering(companion, target)
+            ElseIf actionName == ACTION_MOVE_TO
+                ; The count says how many meters in front of the target the companion stops (below 0 = the server named none)
+                resultText = StartMoveTo(companion, target, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1))
             Else
                 If followAgain && actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_MOVE_TO
                     SetWaiting(companion, false)
@@ -1371,13 +1420,6 @@ string Function DoCommand(Actor companion, string actionName, ObjectReference ta
         companion.StartCombat(target as Actor)
         Return "You attack " + target.GetDisplayName() + " now."
     EndIf
-    If actionName == ACTION_MOVE_TO
-        ; Waiting comes first. A companion that follows would turn around to the player as soon as it has arrived
-        SetWaiting(companion, true)
-        _walkTarget = target
-        StartWalk()
-        Return "You walk to " + target.GetDisplayName() + " and wait there. 'follow' brings you back to the player."
-    EndIf
     If actionName == ACTION_FLEE
         StartFleeing(companion)
         ; The game decides between fighting and running when a fight starts, so the running fight is ended
@@ -1392,6 +1434,53 @@ string Function DoCommand(Actor companion, string actionName, ObjectReference ta
         Return "You stop fighting. Whoever keeps attacking you or the player will pull you back into the fight."
     EndIf
     Return "You were not fighting."
+EndFunction
+
+; Whether the companion only waits because a command made it wait for a while, although it was following the player:
+; a loot or pick_up that is still running, or a make_room. The command that asks takes over from there:
+; it has to make the companion follow again, or leave it waiting on purpose
+bool Function TakeFollowAgain()
+    bool followAgain = (_isLootWalk && _followAfterLoot) || _isRoomHold
+    _isRoomHold = false
+    Return followAgain
+EndFunction
+
+; move_to: the companion walks to a character or a thing and waits there. Only call this after the command was checked.
+; keepMeters: how far in front of the target it stops. Below 0 = as usual: a little away from a character
+; (in a test it walked right into the Jarl), right up to a thing
+string Function StartMoveTo(Actor companion, ObjectReference target, int keepMeters)
+    ; Waiting comes first. A companion that follows would turn around to the player as soon as it has arrived
+    SetWaiting(companion, true)
+    If keepMeters < 0
+        keepMeters = 0
+        If target as Actor
+            keepMeters = MoveToPersonMeters
+        EndIf
+    ElseIf keepMeters > MoveToHighestKeepMeters
+        keepMeters = MoveToHighestKeepMeters
+    EndIf
+    ObjectReference stopMarker = None
+    If keepMeters > 0
+        stopMarker = GetRoomMarker(companion)
+    EndIf
+    If !stopMarker
+        _walkTarget = target
+        StartWalk()
+        Return "You walk to " + target.GetDisplayName() + " and wait there. 'follow' brings you back to the player."
+    EndIf
+    ; The spot to stop at lies on the line from the target to the companion
+    float keepUnits = keepMeters * GameUnitsPerMeter
+    float awayX = companion.GetPositionX() - target.GetPositionX()
+    float awayY = companion.GetPositionY() - target.GetPositionY()
+    float apart = Math.sqrt(awayX * awayX + awayY * awayY)
+    If apart <= keepUnits + MoveToNearEnoughUnits
+        Return "You are within about " + keepMeters + " meters of " + target.GetDisplayName() + " already. You wait here. 'follow' brings you back to the player."
+    EndIf
+    stopMarker.MoveTo(target, awayX / apart * keepUnits, awayY / apart * keepUnits, 0.0, false)
+    _walkShownTarget = target
+    _walkTarget = stopMarker
+    StartWalk()
+    Return "You walk to " + target.GetDisplayName() + ", stop about " + keepMeters + " meters in front, and wait there. 'follow' brings you back to the player."
 EndFunction
 
 ; The server sends the ref_id of the target as a number as well, because Papyrus cannot read hex text.
@@ -1721,14 +1810,17 @@ EndFunction
 ; Sends the companion out of the way. Only call this after the command was checked
 string Function StartMakingRoom(Actor companion, ObjectReference roomMarker, int directionCode, int meters, string directionName)
     ; A loot that gets cut short had made the companion wait, although it was following the player
-    bool followAgain = _isLootWalk && _followAfterLoot
+    bool followAgain = TakeFollowAgain()
     ; As for every command that makes the companion walk: the walk before ends, and the companion gets up
     EndWalk()
-    If followAgain
-        SetWaiting(companion, false)
-    EndIf
     StandUp()
     StopGesture(companion)
+    ; The game pulls a companion that follows back to its place while it walks: in a test it only turned on the spot.
+    ; So it waits for the walk and for a while after it, and follows again then (see EndRoomHold)
+    If followAgain || !IsWaiting(companion)
+        SetWaiting(companion, true)
+        _isRoomHold = true
+    EndIf
 
     ; The direction away from the player as a step of the length 1 (x grows to the east, y to the north)
     Actor player = Game.GetPlayer()
@@ -1756,11 +1848,54 @@ string Function StartMakingRoom(Actor companion, ObjectReference roomMarker, int
     If meters < 1 || meters > RoomHighestMeters
         meters = RoomDefaultMeters
     EndIf
-    StartMarkerWalk(companion, roomMarker, stepX, stepY, meters * GameUnitsPerMeter)
+    _roomStepX = stepX
+    _roomStepY = stepY
+    _roomUnits = meters * GameUnitsPerMeter
+    _roomTryCount = 0
+    StartMarkerWalk(companion, roomMarker, stepX, stepY, _roomUnits)
+    string afterText = " If the way is blocked you try another side yourself, and your next STATE tells you. Apart from that you wait or follow as before."
     If directionCode == RoomDirectionLeft || directionCode == RoomDirectionRight
-        Return "You step about " + meters + " meters to the " + directionName + ", as the player sees it. Apart from that you wait or follow as before."
+        Return "You set off to step about " + meters + " meters to the " + directionName + ", as the player sees it." + afterText
     EndIf
-    Return "You step back about " + meters + " meters, away from the player. Apart from that you wait or follow as before."
+    Return "You set off to step back about " + meters + " meters, away from the player." + afterText
+EndFunction
+
+; make_room: the way was blocked. Sends the companion another way and returns true, or returns false if it has tried
+; every other direction it tries on its own
+bool Function TryOtherRoomDirection(Actor companion, ObjectReference roomMarker)
+    If _roomTryCount >= RoomOtherTries
+        Return false
+    EndIf
+    _roomTryCount += 1
+    float turnedX = 0.0 - _roomStepX
+    float turnedY = 0.0 - _roomStepY
+    If _roomTryCount == 1
+        ; A quarter turn to the left of where it was sent. The try after that is the opposite of this one
+        turnedX = 0.0 - _roomStepY
+        turnedY = _roomStepX
+    EndIf
+    _roomStepX = turnedX
+    _roomStepY = turnedY
+    ; What is still running of the try before finds a new number and stays silent
+    _walkNumber += 1
+    StartMarkerWalk(companion, roomMarker, _roomStepX, _roomStepY, _roomUnits)
+    Return true
+EndFunction
+
+; make_room: a companion that only waits because of it follows the player again, after standing at the new spot
+; for a while if stayFirst. A newer command that came in the meantime has the last word
+Function EndRoomHold(Actor companion, int ownWalkNumber, bool stayFirst)
+    If !_isRoomHold
+        Return
+    EndIf
+    If stayFirst
+        Utility.Wait(RoomHoldSeconds)
+    EndIf
+    If ownWalkNumber != _walkNumber || !_isRoomHold
+        Return
+    EndIf
+    _isRoomHold = false
+    SetWaiting(companion, false)
 EndFunction
 
 ; Puts the marker stepUnits away from the companion, in the direction of the step (stepX to the east, stepY to the
@@ -1780,6 +1915,7 @@ EndFunction
 ; degrees: the direction, counted clockwise from north, or from where the companion faces if isFromFacing
 string Function StartMoving(Actor companion, ObjectReference roomMarker, int degrees, bool isFromFacing, int meters, string directionWords)
     ; As for move_to: what the command before started ends, and the companion stays where the walk takes it
+    TakeFollowAgain()
     EndWalk()
     StopFleeing()
     StopFollowingLeader()
@@ -1868,7 +2004,7 @@ EndFunction
 ; arrowName: not empty = the thing is an arrow that was shot, with the halves of its ID
 string Function StartPickUp(Actor companion, ObjectReference itemRef, string arrowName, int arrowHigh, int arrowLow)
     ; A loot that gets cut short had made the companion wait, although it was following the player
-    bool followAgain = _isLootWalk && _followAfterLoot
+    bool followAgain = TakeFollowAgain()
     EndWalk()
     StopFleeing()
     StopFollowingLeader()
@@ -2172,6 +2308,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     bool isLootWalk = _isLootWalk
     bool isEnterWalk = _isEnterWalk
     bool isRoomWalk = _isRoomWalk
+    ObjectReference shownTarget = _walkShownTarget
     Form lootItem = _lootItem
     ; The command has just told the companion to wait. The game gets a moment to be done with that,
     ; because a walk that was started right away sometimes never began
@@ -2186,6 +2323,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         Return
     EndIf
     _walkTarget = None
+    _walkShownTarget = None
     If isLootWalk
         _isLootWalk = false
         _lootItem = None
@@ -2203,9 +2341,21 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
             If steppedUnits < _moveWantedUnits - MoveShortUnits
                 AddReport("You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there.")
             EndIf
-        ElseIf steppedUnits < RoomMovedUnits
-            AddReport("You could not make room that way: something is in the way. Try another direction.")
+            Return
         EndIf
+        If steppedUnits < RoomMovedUnits
+            ; Something is in the way. The companion tries another side on its own before it gives up
+            If TryOtherRoomDirection(companion, walkTarget)
+                Return
+            EndIf
+            AddReport("You could not make room: something is in the way on every side you tried.")
+            EndRoomHold(companion, ownWalkNumber, false)
+            Return
+        EndIf
+        If _roomTryCount > 0
+            AddReport("The way you wanted to step was blocked, so you stepped aside another way.")
+        EndIf
+        EndRoomHold(companion, ownWalkNumber, true)
         Return
     EndIf
     If isEnterWalk
@@ -2222,8 +2372,12 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         Return
     EndIf
     If !hasArrived
-        AddReport("You did not get to " + walkTarget.GetDisplayName() + ".")
-        Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
+        string walkName = walkTarget.GetDisplayName()
+        If shownTarget
+            walkName = shownTarget.GetDisplayName()
+        EndIf
+        AddReport("You did not get to " + walkName + ".")
+        Debug.Notification("AI companion: did not get to " + walkName)
     EndIf
 EndEvent
 
@@ -2258,7 +2412,9 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
 
     ; The companion has not moved. The walk that hangs finds a new number if it ever comes back, and stays silent
     _walkNumber += 1
-    If !_isLootWalk && _walkRestartCount < WalkRestarts
+    ; Stepping out of the way is not started again either: the companion tries another side instead (see below)
+    bool isStepAside = _isRoomWalk && !_isMoveWalk
+    If !_isLootWalk && !isStepAside && _walkRestartCount < WalkRestarts
         _walkRestartCount += 1
         companion.EvaluatePackage()
         SendModEvent(EVENT_WALK, "", _walkNumber as float)
@@ -2266,6 +2422,8 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         Return
     EndIf
     _walkTarget = None
+    ObjectReference shownTarget = _walkShownTarget
+    _walkShownTarget = None
     If _isLootWalk
         Form lootItem = _lootItem
         _isLootWalk = false
@@ -2284,19 +2442,25 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         If _isMoveWalk
             _isMoveWalk = false
             AddReport("You did not get going: there seems to be no way in that direction. Try another one.")
-        Else
-            AddReport("You could not make room: you did not get going. Try another direction.")
+        ElseIf !TryOtherRoomDirection(companion, walkTarget)
+            AddReport("You could not make room: you did not get going on any side you tried.")
+            EndRoomHold(companion, _walkNumber, false)
         EndIf
         Return
     EndIf
-    AddReport("You did not get going towards " + walkTarget.GetDisplayName() + ". Try 'move_to' again, or 'follow'.")
-    Debug.Notification("AI companion: did not get going towards " + walkTarget.GetDisplayName())
+    string walkName = walkTarget.GetDisplayName()
+    If shownTarget
+        walkName = shownTarget.GetDisplayName()
+    EndIf
+    AddReport("You did not get going towards " + walkName + ". Try 'move_to' again, or 'follow'.")
+    Debug.Notification("AI companion: did not get going towards " + walkName)
 EndEvent
 
 ; A walk that is still running finds a new number when it comes back and then stays silent
 Function EndWalk()
     _walkNumber += 1
     _walkTarget = None
+    _walkShownTarget = None
     _isSitWalk = false
     _isLootWalk = false
     _isEnterWalk = false

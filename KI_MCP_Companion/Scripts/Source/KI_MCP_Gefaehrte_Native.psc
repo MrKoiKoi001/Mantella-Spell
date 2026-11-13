@@ -106,3 +106,11 @@ bool Function SetSayText(Actor speaker, string text) global native
 ; 1 = a wall or another upright obstacle, 2 = ground that rises), how far away in meters (0 if nothing), and after
 ; how many meters the ground drops away (-1 = it does not). Empty if the game cannot tell
 int[] Function GetSurroundings(Actor origin, int rangeMeters) global native
+
+; The function below exists from interface version 10 on
+
+; What in the loaded area around the character "origin" (None or far away outdoors = the player) has a name that holds
+; every word of the text, nearest first, at most maxResults. Capitals do not matter. One text per match, built like the
+; lines of GetNearbyThings: kind (0 = a character, 1 = a door, 2 = a map marker, 3 = a thing), ref ID, distance in meters,
+; angle in degrees (negative = left), for a character 1 if it is dead (0 otherwise), name (for a door: of the place it leads to)
+string[] Function FindByName(string text, int maxResults, Actor origin) global native
