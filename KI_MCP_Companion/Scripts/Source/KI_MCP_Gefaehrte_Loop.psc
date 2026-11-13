@@ -100,6 +100,19 @@ float Property WalkWatchSeconds = 4.0 AutoReadOnly
 float Property LootWatchSeconds = 3.0 AutoReadOnly
 float Property WalkStartedUnits = 50.0 AutoReadOnly
 int Property WalkRestarts = 2 AutoReadOnly
+; enter: the game often counts the walk to a door as failed although the companion stands in front of it
+; (in a test it stopped about a meter short). Within this distance of the door it goes through all the same
+float Property EnterReachUnits = 420.0 AutoReadOnly
+; make_room: the thing of the game nobody sees that marks the spot the companion walks to (XMarker of Skyrim.esm)
+int Property XMarkerFormId = 0x0000003B AutoReadOnly
+; make_room: the numbers the server sends for the directions (anything else = back, away from the player),
+; how far the companion steps if the server names no distance, and the furthest it may be sent
+int Property RoomDirectionLeft = 1 AutoReadOnly
+int Property RoomDirectionRight = 2 AutoReadOnly
+int Property RoomDefaultMeters = 3 AutoReadOnly
+int Property RoomHighestMeters = 10 AutoReadOnly
+; make_room: a companion that has moved less than this far has not made room
+float Property RoomMovedUnits = 70.0 AutoReadOnly
 ; The quest of this mod that makes the companion sit: whoever is in its alias "Sitter" gets a package of the game
 ; that walks to whatever is in its alias "Seat" and uses it. Scripts cannot seat a character on their own
 int Property SitQuestFormId = 0x00000801 AutoReadOnly
@@ -197,6 +210,7 @@ string Property ACTION_GESTURE = "gesture" AutoReadOnly
 string Property ACTION_SAY = "say" AutoReadOnly
 string Property ACTION_ENTER = "enter" AutoReadOnly
 string Property ACTION_EXPRESSION = "expression" AutoReadOnly
+string Property ACTION_MAKE_ROOM = "make_room" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -228,6 +242,12 @@ bool _isEnterWalk = false
 ObjectReference _entryDoor
 ; expression: how the companion looks because of it, as the AI named it ("" = its own face)
 string _expressionName = ""
+; make_room: the walk that is running only takes the companion out of the way. The marker of this mod it walks to
+; (made once, then moved to where it is needed), and where the companion stood when it set off
+bool _isRoomWalk = false
+ObjectReference _roomMarker
+float _roomStartX = 0.0
+float _roomStartY = 0.0
 ; How often the walk that is running was started again because the companion did not get going
 int _walkRestartCount = 0
 ; loot: the walk that is running leads to a body or a container. What to take there (None = everything),
@@ -627,7 +647,8 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[8] = companionTarget.GetFormID()
     EndIf
     companionValues[10] = ToNumber(_fleeingActor == companion)
-    If _walkTarget
+    ; The marker of make_room is nothing the AI could name, so that walk is not told
+    If _walkTarget && !_isRoomWalk
         companionValues[11] = _walkTarget.GetFormID()
     EndIf
     companionValues[12] = companion.GetSitState()
@@ -1030,7 +1051,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, enter, loot, sit, look_at, gesture, expression, say, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, enter, make_room, loot, sit, look_at, gesture, expression, say, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -1107,6 +1128,18 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "You do the gesture '" + gestureName + "'. If it goes on and on, 'gesture' with 'stop' ends it."
         Else
             resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not sitting, not walking."
+        EndIf
+    ElseIf actionName == ACTION_MAKE_ROOM
+        ; The server sends the direction as a number in the count (see RoomDirection...), how far in meters where loot
+        ; has the lower half of an item ID, and the name of the direction for the answer
+        ObjectReference roomMarker = GetRoomMarker(companion)
+        If !companion.Is3DLoaded()
+            resultText = "You are not where the player is, so you are in nobody's way."
+        ElseIf !roomMarker
+            resultText = "The game mod could not mark the spot to walk to."
+        Else
+            isOk = true
+            resultText = StartMakingRoom(companion, roomMarker, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0), SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, ""))
         EndIf
     Else
         ; A character, or for move_to, enter, loot and sit also a thing in the world
@@ -1187,7 +1220,7 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
-    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY || actionName == ACTION_ENTER || actionName == ACTION_EXPRESSION
+    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE || actionName == ACTION_SAY || actionName == ACTION_ENTER || actionName == ACTION_EXPRESSION || actionName == ACTION_MAKE_ROOM
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -1548,6 +1581,74 @@ Function ReturnThroughDoor(Actor companion)
     EndIf
 EndFunction
 
+; ------------------------------------------------------------------ make room
+; make_room: the companion steps a few meters away from the player or to the side, because it stands in the way.
+; Whether it waits or follows (the player or someone else) stays as it is. The walk leads to a marker nobody sees,
+; which this mod puts where the companion should go. It runs like the walk of move_to (see StartWalk)
+
+; The marker the companion walks to. It is made once and kept
+ObjectReference Function GetRoomMarker(Actor companion)
+    If !_roomMarker
+        Form markerBase = Game.GetForm(XMarkerFormId)
+        If markerBase
+            _roomMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
+    Return _roomMarker
+EndFunction
+
+; Sends the companion out of the way. Only call this after the command was checked
+string Function StartMakingRoom(Actor companion, ObjectReference roomMarker, int directionCode, int meters, string directionName)
+    ; A loot that gets cut short had made the companion wait, although it was following the player
+    bool followAgain = _isLootWalk && _followAfterLoot
+    ; As for every command that makes the companion walk: the walk before ends, and the companion gets up
+    EndWalk()
+    If followAgain
+        SetWaiting(companion, false)
+    EndIf
+    StandUp()
+    StopGesture(companion)
+
+    ; The direction away from the player as a step of the length 1 (x grows to the east, y to the north)
+    Actor player = Game.GetPlayer()
+    float awayX = companion.GetPositionX() - player.GetPositionX()
+    float awayY = companion.GetPositionY() - player.GetPositionY()
+    float apart = Math.sqrt(awayX * awayX + awayY * awayY)
+    If apart < 1.0
+        ; Both stand on the same spot. Then away is where the player faces
+        awayX = Math.sin(player.GetAngleZ())
+        awayY = Math.cos(player.GetAngleZ())
+    Else
+        awayX = awayX / apart
+        awayY = awayY / apart
+    EndIf
+    float stepX = awayX
+    float stepY = awayY
+    If directionCode == RoomDirectionRight
+        ; A quarter turn to the right of that direction: to the right for the player who looks at the companion
+        stepX = awayY
+        stepY = 0.0 - awayX
+    ElseIf directionCode == RoomDirectionLeft
+        stepX = 0.0 - awayY
+        stepY = awayX
+    EndIf
+    If meters < 1 || meters > RoomHighestMeters
+        meters = RoomDefaultMeters
+    EndIf
+    float stepUnits = meters * GameUnitsPerMeter
+
+    _roomStartX = companion.GetPositionX()
+    _roomStartY = companion.GetPositionY()
+    roomMarker.MoveTo(companion, stepX * stepUnits, stepY * stepUnits, 0.0, false)
+    _isRoomWalk = true
+    _walkTarget = roomMarker
+    StartWalk()
+    If directionCode == RoomDirectionLeft || directionCode == RoomDirectionRight
+        Return "You step about " + meters + " meters to the " + directionName + ", as the player sees it. Apart from that you wait or follow as before."
+    EndIf
+    Return "You step back about " + meters + " meters, away from the player. Apart from that you wait or follow as before."
+EndFunction
+
 ; ----------------------------------------------------------------------- loot
 ; loot: the companion walks to a dead character or to a container (a chest, a barrel ...) and takes what is in it:
 ; one kind of item or everything. The walk takes time, so the command only starts it.
@@ -1782,6 +1883,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     EndIf
     bool isLootWalk = _isLootWalk
     bool isEnterWalk = _isEnterWalk
+    bool isRoomWalk = _isRoomWalk
     Form lootItem = _lootItem
     ; The command has just told the companion to wait. The game gets a moment to be done with that,
     ; because a walk that was started right away sometimes never began
@@ -1802,12 +1904,28 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         FinishLoot(companion, walkTarget, lootItem, ownWalkNumber, hasArrived)
         Return
     EndIf
-    If isEnterWalk && hasArrived
-        _isEnterWalk = false
-        FinishEntering(companion, walkTarget)
+    If isRoomWalk
+        _isRoomWalk = false
+        float steppedX = companion.GetPositionX() - _roomStartX
+        float steppedY = companion.GetPositionY() - _roomStartY
+        If steppedX * steppedX + steppedY * steppedY < RoomMovedUnits * RoomMovedUnits
+            AddReport("You could not make room that way: something is in the way. Try another direction.")
+        EndIf
         Return
     EndIf
-    _isEnterWalk = false
+    If isEnterWalk
+        _isEnterWalk = false
+        ; The game often counts the walk as failed although the companion stands in front of the door
+        ; (see EnterReachUnits). Close enough is good enough
+        float doorDistance = companion.GetDistance(walkTarget)
+        If hasArrived || doorDistance <= EnterReachUnits
+            FinishEntering(companion, walkTarget)
+        Else
+            AddReport("You did not get to the door: you stopped about " + ToMeters(doorDistance) + " meters away from it. Go closer with the player, or try 'enter' again.")
+            Debug.Notification("AI companion: did not get to the door")
+        EndIf
+        Return
+    EndIf
     If !hasArrived
         AddReport("You did not get to " + walkTarget.GetDisplayName() + ".")
         Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
@@ -1866,6 +1984,11 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         FinishEntering(companion, walkTarget)
         Return
     EndIf
+    If _isRoomWalk
+        _isRoomWalk = false
+        AddReport("You could not make room: you did not get going. Try another direction.")
+        Return
+    EndIf
     AddReport("You did not get going towards " + walkTarget.GetDisplayName() + ". Try 'move_to' again, or 'follow'.")
     Debug.Notification("AI companion: did not get going towards " + walkTarget.GetDisplayName())
 EndEvent
@@ -1877,6 +2000,7 @@ Function EndWalk()
     _isSitWalk = false
     _isLootWalk = false
     _isEnterWalk = false
+    _isRoomWalk = false
     _lootItem = None
     _walkRestartCount = 0
 EndFunction
