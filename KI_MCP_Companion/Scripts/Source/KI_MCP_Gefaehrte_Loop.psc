@@ -95,6 +95,9 @@ float Property WalkStartPauseSeconds = 0.5 AutoReadOnly
 ; After this time a walk has to have moved the companion by WalkStartedUnits. If not, it is started again,
 ; at most WalkRestarts times
 float Property WalkWatchSeconds = 4.0 AutoReadOnly
+; For loot the watch does not start the walk again: if the companion has not got going this long after the command,
+; it takes the things from where it stands
+float Property LootWatchSeconds = 3.0 AutoReadOnly
 float Property WalkStartedUnits = 50.0 AutoReadOnly
 int Property WalkRestarts = 2 AutoReadOnly
 ; The quest of this mod that makes the companion sit: whoever is in its alias "Sitter" gets a package of the game
@@ -1393,8 +1396,9 @@ EndEvent
 
 ; Raised together with the walk. In the game a walk sometimes never started: the companion stood still,
 ; and the call in OnWalkRequested never came back, so the state said "walking to" for good.
-; So this looks after a few seconds whether the companion got going. If not, the walk is started again,
-; and after WalkRestarts tries it is given up: loot then takes the things from where the companion stands
+; So this looks after a few seconds whether the companion got going. If not, a walk of move_to is started again
+; and given up after WalkRestarts tries. A walk of loot is given up at once (after LootWatchSeconds):
+; the companion then takes the things from where it stands
 Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form sender)
     int ownWalkNumber = numArg as int
     Actor companion = GetCompanion()
@@ -1404,7 +1408,11 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
     EndIf
     float startX = companion.GetPositionX()
     float startY = companion.GetPositionY()
-    Utility.Wait(WalkStartPauseSeconds + WalkWatchSeconds)
+    If _isLootWalk
+        Utility.Wait(LootWatchSeconds)
+    Else
+        Utility.Wait(WalkStartPauseSeconds + WalkWatchSeconds)
+    EndIf
     If ownWalkNumber != _walkNumber || _walkTarget != walkTarget
         ; The walk is over, or a newer command has taken over
         Return
@@ -1417,7 +1425,7 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
 
     ; The companion has not moved. The walk that hangs finds a new number if it ever comes back, and stays silent
     _walkNumber += 1
-    If _walkRestartCount < WalkRestarts
+    If !_isLootWalk && _walkRestartCount < WalkRestarts
         _walkRestartCount += 1
         companion.EvaluatePackage()
         SendModEvent(EVENT_WALK, "", _walkNumber as float)
