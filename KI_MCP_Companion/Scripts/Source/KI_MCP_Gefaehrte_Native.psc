@@ -23,30 +23,33 @@ bool Function IsHearing() global native
 ; A line the player picked in a dialogue menu has the player as its speaker
 string[] Function TakeHeardLines(int maxLines) global native
 
-; The two functions below exist from interface version 3 on
+; The three functions below exist in this form from interface version 5 on. Versions 3 and 4 had them without
+; "origin" and without the ref IDs of places and quest targets, so this script does not fit an older DLL.
+; origin is the character from whom everything is seen ("the viewer"): distances, angles, and what counts as
+; "this area". None, or a character that is not in the loaded area, means the player
 
 ; Where the targets of the tracked quests are (what the compass of the game points to), at most maxTargets.
 ; One text per target, its parts separated by tabs:
 ; place of the quest in the list GetOpenQuests(maxQuests) returns (from 0), place of the objective in that quest (from 0),
-; where the target is (0 = in the area of the player, 1 = behind a door of this area, 2 = somewhere else),
-; distance to the player in meters, angle from where the player faces in degrees (negative = left)
+; where the target is (0 = in the area of the viewer, 1 = behind a door of this area, 2 = somewhere else),
+; distance to the viewer in meters, angle from where the viewer faces in degrees (negative = left)
 ; - for 1 these are the distance and angle of that door, for 2 both are 0 -,
-; name of the target (can be empty), and for 1 and 2 the name of the place behind the door or of the place the target is in
-string[] Function GetQuestTargets(int maxQuests, int maxTargets) global native
+; name of the target (can be empty), for 1 and 2 the name of the place behind the door or of the place the target is in,
+; and the ref ID to walk to as eight hex digits: the target for 0, that door for 1, 00000000 for 2
+string[] Function GetQuestTargets(int maxQuests, int maxTargets, Actor origin) global native
 
-; The places around the player, map markers first, then doors, each nearest first: at most maxMarkers map markers
+; The places around the viewer, map markers first, then doors, each nearest first: at most maxMarkers map markers
 ; within radiusMeters (none indoors), and at most maxDoors doors in the loaded area within radiusMeters that lead
 ; into another area (a building, a cave, out of town). 0 switches that kind off. One text per place, its parts separated by tabs:
-; kind (0 = map marker, 1 = door), distance to the player in meters, angle from where the player faces in degrees
+; kind (0 = map marker, 1 = door), ref ID of the marker or the door as eight hex digits,
+; distance to the viewer in meters, angle from where the viewer faces in degrees
 ; (negative = left), for a map marker the kind of place as the game numbers it (13 = farm, 21 = stable ...),
 ; for a map marker 1 if the player has been there, name of the place (for a door: of the place it leads to)
-string[] Function GetNearbyPlaces(int radiusMeters, int maxMarkers, int maxDoors) global native
+string[] Function GetNearbyPlaces(int radiusMeters, int maxMarkers, int maxDoors, Actor origin) global native
 
-; The function below exists from interface version 4 on
-
-; The things close to the player: furniture first, then containers, then items that lie around, each nearest first,
+; The things close to the viewer: furniture first, then containers, then items that lie around, each nearest first,
 ; at most maxPerKind of each kind within radiusMeters. Things without a name are left out.
 ; One text per thing, its parts separated by tabs: kind (0 = furniture, 1 = container, 2 = item),
-; ref ID as eight hex digits, distance to the player in meters, angle from where the player faces in degrees
+; ref ID as eight hex digits, distance to the viewer in meters, angle from where the viewer faces in degrees
 ; (negative = left), for furniture 1 if a character can sit on it, for a container 1 if it is locked, name
-string[] Function GetNearbyThings(int radiusMeters, int maxPerKind) global native
+string[] Function GetNearbyThings(int radiusMeters, int maxPerKind, Actor origin) global native

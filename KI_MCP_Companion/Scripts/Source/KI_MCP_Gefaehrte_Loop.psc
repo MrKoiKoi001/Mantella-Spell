@@ -36,16 +36,18 @@ int Property MaxQuests = 25 AutoReadOnly
 int Property NativeVersionWithHearing = 2 AutoReadOnly
 ; At most this many lines that were heard go to the server with one state
 int Property MaxHeardLines = 20 AutoReadOnly
-; From this interface version on the SKSE plugin knows where quest targets are and which places are around
-int Property NativeVersionWithPlaces = 3 AutoReadOnly
+; From this interface version on the SKSE plugin knows where quest targets are and which places are around.
+; Version 5 made these functions take the character they look from, so an older DLL does not fit this script
+int Property NativeVersionWithPlaces = 5 AutoReadOnly
 ; At most this many targets of tracked quests go to the server
 int Property MaxQuestTargets = 8 AutoReadOnly
 ; Places around the player: how far the plugin looks, and how many map markers and doors go to the server
 int Property PlaceRadiusMeters = 300 AutoReadOnly
 int Property MaxPlaceMarkers = 6 AutoReadOnly
 int Property MaxPlaceDoors = 6 AutoReadOnly
-; From this interface version on the SKSE plugin knows the things close to the player (furniture, containers, items)
-int Property NativeVersionWithThings = 4 AutoReadOnly
+; From this interface version on the SKSE plugin knows the things close to the player (furniture, containers, items).
+; Version 5 for the same reason as above
+int Property NativeVersionWithThings = 5 AutoReadOnly
 ; Things around the player: how far the plugin looks. They only go to the server when it asked for them
 int Property ThingRadiusMeters = 10 AutoReadOnly
 ; Gold is an item like any other. This is its form ID in Skyrim.esm
@@ -74,7 +76,7 @@ int Property FormTypeFurniture = 40 AutoReadOnly
 int Property SitStateSeated = 3 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 2 AutoReadOnly
+int Property ProtocolNumber = 3 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -83,6 +85,32 @@ int Property HighestListLimit = 30 AutoReadOnly
 ; Own event that starts the walk of move_to and loot. Walking makes a script wait until the character has arrived,
 ; and the loop must not wait that long. An event runs next to the loop
 string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
+; Own event that keeps an eye on such a walk: in the game a walk sometimes never started, and the call that
+; starts it never came back. And the own event that waits until the companion sits (see OnSitRequested)
+string Property EVENT_WALK_WATCH = "KI_MCP_Gefaehrte_WalkWatch" AutoReadOnly
+string Property EVENT_SIT = "KI_MCP_Gefaehrte_Sit" AutoReadOnly
+; A walk starts this long after its command, so that the game is done with the new orders (wait, follow)
+; of the companion before it gets sent off
+float Property WalkStartPauseSeconds = 0.5 AutoReadOnly
+; After this time a walk has to have moved the companion by WalkStartedUnits. If not, it is started again,
+; at most WalkRestarts times
+float Property WalkWatchSeconds = 4.0 AutoReadOnly
+float Property WalkStartedUnits = 50.0 AutoReadOnly
+int Property WalkRestarts = 2 AutoReadOnly
+; The quest of this mod that makes the companion sit: whoever is in its alias "Sitter" gets a package of the game
+; that walks to whatever is in its alias "Seat" and uses it. Scripts cannot seat a character on their own
+int Property SitQuestFormId = 0x00000801 AutoReadOnly
+string Property OwnPluginFile = "KI_MCP_Gefaehrte.esp" AutoReadOnly
+int Property SitAliasSitter = 0 AutoReadOnly
+int Property SitAliasSeat = 1 AutoReadOnly
+; How long the companion gets to walk to a seat and sit down, and how often the script looks whether it sits
+float Property SitTimeoutSeconds = 40.0 AutoReadOnly
+float Property SitCheckSeconds = 1.0 AutoReadOnly
+; look_at only turns the head, and a head does not turn all the way round. If the target is further to the side
+; than this many degrees, the body turns as well
+float Property LookTurnDegrees = 70.0 AutoReadOnly
+; The animation event that brings a character back to standing normally. It ends a gesture that would go on forever
+string Property AnimationEventDefault = "IdleForceDefaultState" AutoReadOnly
 
 ; ------------------------------------------------------------------- protocol
 ; These strings have to match src/companion/companion_constants.py in the Mantella fork
@@ -109,12 +137,16 @@ string Property KEY_COMMAND_COUNT = "companion_count" AutoReadOnly
 ; For report_state: 1 if the state should carry the things close to the player. KEY_COMMAND_COUNT then says how many
 ; characters (and things of each kind) it should list at most
 string Property KEY_COMMAND_THINGS = "companion_things" AutoReadOnly
+; For report_state: 1 if the lists of the state (characters, things, places, quest targets) should be seen from
+; the companion instead of from the player
+string Property KEY_COMMAND_AROUND = "companion_around" AutoReadOnly
 string Property INVENTORY_OWN = "own" AutoReadOnly
 string Property INVENTORY_PLAYER = "player" AutoReadOnly
 string Property INVENTORY_BOTH = "both" AutoReadOnly
 ; What the dead character carries that the target of the report_state command names
 string Property INVENTORY_CORPSE = "corpse" AutoReadOnly
-; For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything
+; For loot: the ID of the one item to take from the body, cut in two like the target. Both 0 = everything.
+; For gesture: the ID of the animation to play (an "Idle" of the game). Both 0 = end the gesture
 string Property KEY_COMMAND_ITEM_HIGH = "companion_item_high" AutoReadOnly
 string Property KEY_COMMAND_ITEM_LOW = "companion_item_low" AutoReadOnly
 string Property ACTION_REPORT_STATE = "report_state" AutoReadOnly
@@ -130,6 +162,8 @@ string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
 string Property ACTION_LOOT = "loot" AutoReadOnly
 string Property ACTION_SIT = "sit" AutoReadOnly
+string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
+string Property ACTION_GESTURE = "gesture" AutoReadOnly
 
 ; ------------------------------------------------------------------ variables
 
@@ -140,15 +174,24 @@ bool _isContactShown = false
 DialogueFollowerScript _followerQuest
 ; Whom or what the companion is walking to at the moment because of move_to, loot or sit (None = nothing)
 ObjectReference _walkTarget
-; sit: the walk that is running leads to a seat, and the seat the companion took because of sit (None = none)
+; sit: the companion is on its way to a seat, and the seat it was sent to because of sit (None = none).
+; As long as _seat is set, the companion is in the alias of the sit quest
 bool _isSitWalk = false
 ObjectReference _seat
+; The sit quest of this mod, looked up once
+Quest _sitQuest
+; What the companion looks at because of look_at (None = nothing in particular)
+ObjectReference _lookTarget
+; Whether the companion plays a gesture that may go on until something ends it
+bool _isGesturing = false
+; How often the walk that is running was started again because the companion did not get going
+int _walkRestartCount = 0
 ; loot: the walk that is running leads to a body or a container. What to take there (None = everything),
 ; and whether the companion followed the player before and should do so again afterwards
 bool _isLootWalk = false
 Form _lootItem
 bool _followAfterLoot = false
-; What became of commands that take time (loot, move_to), as text for the AI. Goes out with the next state
+; What became of commands that take time (loot, move_to, sit), as text for the AI. Goes out with the next state
 string _report = ""
 ; Goes up with every command. A walk that was started under an older number has been replaced and stays silent
 int _walkNumber = 0
@@ -169,6 +212,8 @@ ObjectReference _wantedCorpse
 ; and whether the things close to the player should go along. Both are used up by BuildState
 int _wantedListLimit = 0
 bool _wantedThings = false
+; Whether the last report_state command asked for the lists as the companion sees them. Used up by BuildState
+bool _wantedAround = false
 
 ; --------------------------------------------------------------------- events
 
@@ -185,10 +230,13 @@ Function StartLoop()
     RegisterForModEvent("SKSE_HTTP_OnHttpReplyReceived", "OnHttpReplyReceived")
     RegisterForModEvent("SKSE_HTTP_OnHttpErrorReceived", "OnHttpErrorReceived")
     RegisterForModEvent(EVENT_WALK, "OnWalkRequested")
-    ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk
+    RegisterForModEvent(EVENT_WALK_WATCH, "OnWalkWatchRequested")
+    RegisterForModEvent(EVENT_SIT, "OnSitRequested")
+    ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
+    ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
     StopFleeing()
     EndWalk()
-    _seat = None
+    _isGesturing = false
     _nativeVersion = 0
     _isHearing = false
     If SKSE.GetPluginVersion(NativePluginName) != -1
@@ -286,12 +334,26 @@ int Function BuildState()
     SetStringSafely(stateHandle, "location", GetLocationName(player))
     SetStringSafely(stateHandle, "player_name", player.GetDisplayName())
 
+    ; From whom the lists of this state are seen (characters, things, places, quest targets): from the player,
+    ; or from the companion if the server asked for that and the companion stands in the loaded area
+    bool isAroundWanted = _wantedAround
+    _wantedAround = false
+    Actor companion = GetCompanion()
+    Actor viewer = player
+    If isAroundWanted && companion && companion.Is3DLoaded()
+        viewer = companion
+    EndIf
+    ; A companion that was sent away while it sat would keep sitting for good
+    If _seat && !companion
+        ReleaseSeat()
+    EndIf
+
     ; Health in percent, in combat, position x, y and z in game units,
-    ; direction the player faces in degrees (0 = north, 90 = east), indoors
+    ; direction the player faces in degrees (0 = north, 90 = east), indoors, weapon drawn
     float playerX = player.GetPositionX()
     float playerY = player.GetPositionY()
     float playerZ = player.GetPositionZ()
-    int[] playerValues = new int[7]
+    int[] playerValues = new int[8]
     playerValues[0] = GetHealthPercent(player)
     playerValues[1] = ToNumber(player.IsInCombat())
     playerValues[2] = playerX as int
@@ -299,12 +361,14 @@ int Function BuildState()
     playerValues[4] = playerZ as int
     playerValues[5] = player.GetAngleZ() as int
     playerValues[6] = ToNumber(isInterior)
+    playerValues[7] = ToNumber(player.IsWeaponDrawn())
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; Weather outside (-1 = unknown, 0 = pleasant, 1 = cloudy, 2 = rainy, 3 = snow), the time of day in minutes since midnight,
     ; the interface version of the SKSE plugin of this mod (0 = not loaded, so there are no quests in this state),
-    ; whether that plugin listens to what characters say, and the number of this protocol (see ProtocolNumber)
-    int[] worldValues = new int[5]
+    ; whether that plugin listens to what characters say, the number of this protocol (see ProtocolNumber),
+    ; and whether the lists of this state are seen from the companion (1) or from the player (0)
+    int[] worldValues = new int[6]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -316,6 +380,7 @@ int Function BuildState()
     worldValues[2] = _nativeVersion
     worldValues[3] = ToNumber(_isHearing)
     worldValues[4] = ProtocolNumber
+    worldValues[5] = ToNumber(viewer != player)
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
 
     ; The open quests of the journal with the texts of their objectives, one text per quest
@@ -327,15 +392,15 @@ int Function BuildState()
         EndIf
     EndIf
 
-    ; Where the targets of the tracked quests are, and the places around the player (map markers and doors
+    ; Where the targets of the tracked quests are, and the places around the viewer (map markers and doors
     ; that lead somewhere), one text per target and per place (see KI_MCP_Gefaehrte_Native.psc).
     ; The targets name their quest by its place in the list above, so both lists are fetched with the same limit
     If _nativeVersion >= NativeVersionWithPlaces
-        string[] targetLines = KI_MCP_Gefaehrte_Native.GetQuestTargets(MaxQuests, MaxQuestTargets)
+        string[] targetLines = KI_MCP_Gefaehrte_Native.GetQuestTargets(MaxQuests, MaxQuestTargets, viewer)
         If targetLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "quest_targets", targetLines)
         EndIf
-        string[] placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors)
+        string[] placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors, viewer)
         If placeLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "places", placeLines)
         EndIf
@@ -352,10 +417,10 @@ int Function BuildState()
     bool areThingsWanted = _wantedThings
     _wantedThings = false
 
-    ; Only when the server asked for them: the things close to the player (furniture, containers and items that
+    ; Only when the server asked for them: the things close to the viewer (furniture, containers and items that
     ; lie around), one text per thing (see KI_MCP_Gefaehrte_Native.psc). The plugin goes through them far faster than this script could
     If areThingsWanted && _nativeVersion >= NativeVersionWithThings
-        string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit)
+        string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit, viewer)
         If thingLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "things", thingLines)
         EndIf
@@ -371,7 +436,6 @@ int Function BuildState()
     EndIf
 
     ; No "companion" entry means: the player has no follower at the moment
-    Actor companion = GetCompanion()
     Actor companionTarget = None
     If companion
         companionTarget = companion.GetCombatTarget()
@@ -407,7 +471,7 @@ int Function BuildState()
     EndIf
     _wantedCorpse = None
 
-    ; What became of loot and move_to since the last state. The text is taken out first,
+    ; What became of loot, move_to and sit since the last state. The text is taken out first,
     ; because a walk that ends while this script waits for the game adds to it
     string report = _report
     _report = ""
@@ -416,7 +480,16 @@ int Function BuildState()
     EndIf
 
     float scanStartTime = Utility.GetCurrentRealTime()
-    AddNearbyToState(stateHandle, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget, listLimit)
+    If viewer == player
+        AddNearbyToState(stateHandle, player, player, playerX, playerY, playerZ, playerCell, isInterior, companion, companionTarget, listLimit)
+    Else
+        Cell viewerCell = viewer.GetParentCell()
+        bool isViewerInterior = false
+        If viewerCell
+            isViewerInterior = viewerCell.IsInterior()
+        EndIf
+        AddNearbyToState(stateHandle, player, viewer, viewer.GetPositionX(), viewer.GetPositionY(), viewer.GetPositionZ(), viewerCell, isViewerInterior, companion, companionTarget, listLimit)
+    EndIf
 
     ; How long collecting took in milliseconds: all of it, and the characters nearby alone.
     ; The AI has to wait this long for every state, so these numbers show where time is lost
@@ -432,9 +505,10 @@ EndFunction
 ; angle from where the player faces to the companion in degrees (negative = left, positive = right),
 ; ref ID of whom the companion fights (0 = nobody), direction the companion faces in degrees (0 = north, 90 = east),
 ; retreating because of flee, ref ID of whom or what the companion is walking to because of move_to, loot or sit (0 = nothing),
-; sitting as the game tells it (see SitStateSeated)
+; sitting as the game tells it (see SitStateSeated), weapon drawn,
+; ref ID of what the companion looks at because of look_at (0 = nothing in particular)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[13]
+    int[] companionValues = new int[15]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -455,6 +529,10 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[11] = _walkTarget.GetFormID()
     EndIf
     companionValues[12] = companion.GetSitState()
+    companionValues[13] = ToNumber(companion.IsWeaponDrawn())
+    If _lookTarget
+        companionValues[14] = _lookTarget.GetFormID()
+    EndIf
     Return companionValues
 EndFunction
 
@@ -570,11 +648,12 @@ bool Function IsContainer(ObjectReference target)
 EndFunction
 
 ; ------------------------------------------------------------------- nearby
-; The characters around the player, living and dead, without the player and the companion.
+; The characters around the viewer (the player, or the companion if the server asked for that), living and dead,
+; without the player and the companion. The position, the cell and "indoors" are those of the viewer.
 ; If there are more than fit into the list, the living win over the dead, and among each the closest ones.
 ; The server sorts the list. If nobody is around, the state gets no "nearby" entries at all
 
-Function AddNearbyToState(int stateHandle, Actor player, float playerX, float playerY, float playerZ, Cell playerCell, bool isInterior, Actor companion, Actor companionTarget, int listLimit)
+Function AddNearbyToState(int stateHandle, Actor player, Actor viewer, float viewerX, float viewerY, float viewerZ, Cell viewerCell, bool isInterior, Actor companion, Actor companionTarget, int listLimit)
     ; The length of these arrays is the highest number of characters that can get listed (HighestListLimit),
     ; listLimit is how many of the places are used this time. Papyrus only takes a plain number as the length of a new array
     Actor[] found = new Actor[30]
@@ -587,20 +666,20 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
     float radius = NearbyRadiusMeters * GameUnitsPerMeter
 
     ; Whoever the companion fights belongs into the list first
-    foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, radius, listLimit)
+    foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, companionTarget, player, companion, viewer, radius, listLimit)
 
-    If playerCell
-        int refCount = playerCell.GetNumRefs(FormTypeNpc)
+    If viewerCell
+        int refCount = viewerCell.GetNumRefs(FormTypeNpc)
         int refIndex = 0
         While refIndex < refCount
-            foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, playerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, radius, listLimit)
+            foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, viewerCell.GetNthRef(refIndex, FormTypeNpc) as Actor, player, companion, viewer, radius, listLimit)
             refIndex += 1
         EndWhile
 
         If !isInterior
             int sampleIndex = 0
             While sampleIndex < RandomSampleCount
-                foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, Game.FindRandomActor(playerX, playerY, playerZ, radius), player, companion, radius, listLimit)
+                foundCount = AddNearbyActor(found, distances, deadFlags, rejected, foundCount, Game.FindRandomActor(viewerX, viewerY, viewerZ, radius), player, companion, viewer, radius, listLimit)
                 sampleIndex += 1
             EndWhile
         EndIf
@@ -610,8 +689,8 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
         Return
     EndIf
 
-    ; Five numbers per character: ref ID, distance to the player in meters,
-    ; angle from where the player faces to the character in degrees (negative = left, positive = right),
+    ; Five numbers per character: ref ID, distance to the viewer in meters,
+    ; angle from where the viewer faces to the character in degrees (negative = left, positive = right),
     ; hostile to the player (always 0 for the dead), dead
     int[] nearbyValues = Utility.CreateIntArray(foundCount * ValuesPerNearby)
     ; One text per character: its place in the list, a colon and its name, eg "0:Bandit".
@@ -623,7 +702,7 @@ Function AddNearbyToState(int stateHandle, Actor player, float playerX, float pl
         int valueIndex = index * ValuesPerNearby
         nearbyValues[valueIndex] = nearbyActor.GetFormID()
         nearbyValues[valueIndex + 1] = ToMeters(distances[index])
-        nearbyValues[valueIndex + 2] = player.GetHeadingAngle(nearbyActor) as int
+        nearbyValues[valueIndex + 2] = viewer.GetHeadingAngle(nearbyActor) as int
         If deadFlags[index]
             nearbyValues[valueIndex + 4] = 1
         Else
@@ -638,7 +717,7 @@ EndFunction
 
 ; Puts the candidate into the list if it is a character in reach, living or dead, that is not listed yet.
 ; Returns the new number of listed characters
-int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, float radius, int listLimit)
+int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, Actor[] rejected, int foundCount, Actor candidate, Actor player, Actor companion, Actor viewer, float radius, int listLimit)
     If !candidate || candidate == player || candidate == companion
         Return foundCount
     EndIf
@@ -647,7 +726,7 @@ int Function AddNearbyActor(Actor[] found, float[] distances, bool[] deadFlags, 
     EndIf
     ; The distance comes first because most characters that do not belong into the list are too far away.
     ; Disabled characters and characters outside the loaded area have no body in the world
-    float distance = candidate.GetDistance(player)
+    float distance = candidate.GetDistance(viewer)
     If distance > radius || !candidate.Is3DLoaded()
         RememberRejected(rejected, candidate)
         Return foundCount
@@ -714,6 +793,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedInventory = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_DETAIL, "")
             _wantedListLimit = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_COUNT, 0)
             _wantedThings = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_THINGS, 0) != 0
+            _wantedAround = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_AROUND, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
             EndIf
@@ -746,7 +826,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, loot, sit, look_at, gesture, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -758,6 +838,38 @@ int Function RunCommand(int commandHandle, string actionName)
         If resultText == ""
             isOk = true
             resultText = DoItemCommand(companion, actionName, item, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1))
+        EndIf
+    ElseIf actionName == ACTION_LOOK_AT
+        ; Where the companion looks changes nothing about where it walks or whom it fights either.
+        ; No target means: look around freely again
+        string lookText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        ObjectReference lookTarget = GetTargetForm(commandHandle) as ObjectReference
+        If lookText != ""
+            resultText = GetTargetProblem(companion, lookTarget, lookText, false)
+        EndIf
+        If resultText == ""
+            isOk = true
+            resultText = DoLookAt(companion, lookTarget)
+        EndIf
+    ElseIf actionName == ACTION_GESTURE
+        ; The server knows the gestures by name and sends the ID of the animation. No ID means: end the gesture
+        int gestureHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
+        int gestureLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+        string gestureName = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        Idle gestureIdle = GetFormFromHalves(gestureHigh, gestureLow) as Idle
+        If gestureHigh == 0 && gestureLow == 0
+            isOk = true
+            _isGesturing = true
+            StopGesture(companion)
+            resultText = "You stand normally again."
+        ElseIf !gestureIdle
+            resultText = "The game has no animation for the gesture '" + gestureName + "'."
+        ElseIf companion.PlayIdle(gestureIdle)
+            isOk = true
+            _isGesturing = true
+            resultText = "You do the gesture '" + gestureName + "'. If it goes on and on, 'gesture' with 'stop' ends it."
+        Else
+            resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not sitting, not walking."
         EndIf
     Else
         ; A character, or for move_to, loot and sit also a thing in the world
@@ -785,13 +897,18 @@ int Function RunCommand(int commandHandle, string actionName)
             If actionName != ACTION_FLEE
                 StopFleeing()
             EndIf
-            ; Staying where it is and ending a fight are no reasons to get up from a seat
+            ; Staying where it is and ending a fight are no reasons to get up from a seat or to end a gesture
             If actionName != ACTION_WAIT && actionName != ACTION_STAND_DOWN
-                StandUp(companion)
+                StandUp()
+                StopGesture(companion)
             EndIf
             If actionName == ACTION_LOOT
                 resultText = StartLoot(companion, target, lootItem, followAgain)
             ElseIf actionName == ACTION_SIT
+                ; A loot that gets cut short had made the companion wait. Once it gets up again it should follow as before
+                If followAgain
+                    SetWaiting(companion, false)
+                EndIf
                 resultText = StartSitting(companion, target)
             Else
                 If followAgain && actionName != ACTION_FOLLOW && actionName != ACTION_WAIT && actionName != ACTION_MOVE_TO
@@ -813,6 +930,9 @@ int Function RunCommand(int commandHandle, string actionName)
 EndFunction
 
 bool Function IsKnownAction(string actionName)
+    If actionName == ACTION_LOOK_AT || actionName == ACTION_GESTURE
+        Return true
+    EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
 EndFunction
 
@@ -839,7 +959,7 @@ string Function DoCommand(Actor companion, string actionName, ObjectReference ta
         ; Waiting comes first. A companion that follows would turn around to the player as soon as it has arrived
         SetWaiting(companion, true)
         _walkTarget = target
-        SendModEvent(EVENT_WALK, "", _walkNumber as float)
+        StartWalk()
         Return "You walk to " + target.GetDisplayName() + " and wait there. 'follow' brings you back to the player."
     EndIf
     If actionName == ACTION_FLEE
@@ -942,8 +1062,53 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
     Return "You give " + count + " " + itemName + " to the player."
 EndFunction
 
-; Returns why the companion cannot attack the target (isAttack) or walk to it, or "" if it can.
-; The target of an attack has to be a character, a walk can also lead to a thing in the world
+; Whether a character or a thing is in the loaded area, so that the companion can walk to it or look at it
+bool Function IsInReach(ObjectReference target)
+    If target.Is3DLoaded()
+        Return true
+    EndIf
+    If target as Actor
+        Return false
+    EndIf
+    ; A map marker has no shape, so it never has a body in the world. It counts if the piece of the world it is in is loaded
+    Cell targetCell = target.GetParentCell()
+    If !targetCell
+        Return false
+    EndIf
+    Return targetCell.IsAttached()
+EndFunction
+
+; ---------------------------------------------------------- look and gesture
+; look_at: the companion keeps its eyes on a character or a thing until look_at without a target frees them again.
+; gesture: the companion plays one of the animations the game has for characters (wave, bow, applaud ...)
+
+; Only call this after the command was checked. No target = look around freely again
+string Function DoLookAt(Actor companion, ObjectReference target)
+    If !target
+        companion.ClearLookAt()
+        _lookTarget = None
+        Return "You look where you like again."
+    EndIf
+    companion.SetLookAt(target)
+    _lookTarget = target
+    ; The head only turns so far. If the target is further to the side and the companion stands around, the body turns as well
+    float angle = companion.GetHeadingAngle(target)
+    If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && !_walkTarget && !companion.IsInCombat() && companion.GetSitState() == 0
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+    EndIf
+    Return "You look at " + target.GetDisplayName() + " now. 'look_at' without a target lets you look around freely again."
+EndFunction
+
+; Ends a gesture that may still be running
+Function StopGesture(Actor companion)
+    If _isGesturing
+        _isGesturing = false
+        Debug.SendAnimationEvent(companion, AnimationEventDefault)
+    EndIf
+EndFunction
+
+; Returns why the companion cannot attack the target (isAttack), walk to it or look at it, or "" if it can.
+; The target of an attack has to be a character, a walk and a look can also go to a thing in the world
 string Function GetTargetProblem(Actor companion, ObjectReference target, string targetText, bool isAttack)
     If !target
         Return "There is nothing with the ref_id '" + targetText + "'. Take the ref_id from 'Nearby' in STATE."
@@ -958,7 +1123,7 @@ string Function GetTargetProblem(Actor companion, ObjectReference target, string
     If isAttack && targetActor == Game.GetPlayer()
         Return "That is the player. You do not attack the player."
     EndIf
-    If !target.Is3DLoaded()
+    If !IsInReach(target)
         Return target.GetDisplayName() + " is too far away."
     EndIf
     If isAttack && targetActor.IsDead()
@@ -1017,7 +1182,7 @@ string Function StartLoot(Actor companion, ObjectReference corpse, Form item, bo
     _isLootWalk = true
     _lootItem = item
     _walkTarget = corpse
-    SendModEvent(EVENT_WALK, "", _walkNumber as float)
+    StartWalk()
     string what = "everything in it"
     If corpse as Actor
         what = "everything it carries"
@@ -1075,59 +1240,123 @@ EndFunction
 
 ; ------------------------------------------------------------------------ sit
 ; sit: the companion walks to a piece of furniture and uses it (sits down on a chair or a bench).
-; A character that activates a piece of furniture uses it, and activating it once more is how it leaves it again
+; A script cannot seat a character: activating the furniture for it did nothing in the game. Only a package
+; of the game can do that. So this mod has a second quest (KI_MCP_Gefaehrte_SitQuest) with two aliases:
+; whoever is put into "Sitter" gets a package that walks to whatever is in "Seat" and uses it.
+; Emptying the aliases gets the companion up again
+
+Quest Function GetSitQuest()
+    If !_sitQuest
+        _sitQuest = Game.GetFormFromFile(SitQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    ; The quest starts with the game. In a save from before it existed it may not be running yet
+    If _sitQuest && !_sitQuest.IsRunning()
+        _sitQuest.Start()
+    EndIf
+    Return _sitQuest
+EndFunction
+
+; One of the two aliases of the sit quest (SitAliasSitter or SitAliasSeat), or None if the quest is missing
+ReferenceAlias Function GetSitAlias(int aliasId)
+    Quest sitQuest = GetSitQuest()
+    If !sitQuest
+        Return None
+    EndIf
+    Return sitQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
 
 ; Returns why the companion cannot sit on the target, or "" if it can
 string Function GetSitProblem(ObjectReference seat)
     Form baseForm = seat.GetBaseObject()
     If !baseForm || baseForm.GetType() != FormTypeFurniture
-        Return seat.GetDisplayName() + " is nothing to sit on. Take the ref_id of a seat from 'Nearby' in STATE."
+        Return seat.GetDisplayName() + " is nothing to sit on. Take the ref_id of a seat from 'Things' in STATE (argument 'things')."
     EndIf
     If seat.IsFurnitureInUse()
         Return seat.GetDisplayName() + " is taken."
     EndIf
+    If !GetSitAlias(SitAliasSitter) || !GetSitAlias(SitAliasSeat)
+        Return "The game mod is missing its sit quest, so you cannot sit down. The mod has to be built and installed again."
+    EndIf
     Return ""
 EndFunction
 
-; Sends the companion to the seat. Only call this after the command was checked
+; Sends the companion to the seat. Only call this after the command was checked.
+; The companion does not have to be told to wait: the package of the sit quest comes before following the player
 string Function StartSitting(Actor companion, ObjectReference seat)
-    ; Waiting comes first: a companion that follows the player would get up again at once
-    SetWaiting(companion, true)
+    GetSitAlias(SitAliasSeat).ForceRefTo(seat)
+    GetSitAlias(SitAliasSitter).ForceRefTo(companion)
+    ; Without this the companion only notices its new package when the game next rethinks what it does
+    companion.EvaluatePackage()
+    _seat = seat
     _isSitWalk = true
     _walkTarget = seat
-    SendModEvent(EVENT_WALK, "", _walkNumber as float)
-    Return "You walk to " + seat.GetDisplayName() + " and sit down. 'follow' makes you get up and come along again."
+    SendModEvent(EVENT_SIT, "", _walkNumber as float)
+    Return "You walk to " + seat.GetDisplayName() + " and sit down. Your next STATE tells you whether you sit. 'follow' makes you get up and come along again."
 EndFunction
 
-; Called when the walk to the seat is over
-Function FinishSitting(Actor companion, ObjectReference seat, int ownWalkNumber)
-    bool isTaken = seat.IsFurnitureInUse()
-    If ownWalkNumber != _walkNumber
-        ; A newer command has taken over in the meantime
+; Raised by StartSitting. numArg is the number of the command that asked for it.
+; Looks every second whether the companion sits, and gives up after SitTimeoutSeconds
+Event OnSitRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownWalkNumber = numArg as int
+    Actor companion = GetCompanion()
+    ObjectReference seat = _walkTarget
+    If ownWalkNumber != _walkNumber || !companion || !seat
         Return
     EndIf
-    If isTaken
-        AddReport("You could not sit down: " + seat.GetDisplayName() + " was taken when you got there.")
-    ElseIf seat.Activate(companion)
-        _seat = seat
-    Else
-        AddReport("You could not sit down on " + seat.GetDisplayName() + ".")
+    float waitedSeconds = 0.0
+    bool isSeated = false
+    While !isSeated && waitedSeconds < SitTimeoutSeconds
+        Utility.Wait(SitCheckSeconds)
+        waitedSeconds += SitCheckSeconds
+        If ownWalkNumber != _walkNumber
+            ; A newer command has taken over in the meantime
+            Return
+        EndIf
+        isSeated = companion.GetSitState() == SitStateSeated
+    EndWhile
+    _walkTarget = None
+    _isSitWalk = false
+    If !isSeated
+        ReleaseSeat()
+        AddReport("You could not sit down on " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it.")
+    EndIf
+EndEvent
+
+; Gets the companion up from the seat it took because of sit
+Function StandUp()
+    If _seat
+        ReleaseSeat()
     EndIf
 EndFunction
 
-; Gets the companion up from the seat it took because of sit
-Function StandUp(Actor companion)
-    ObjectReference seat = _seat
+; Empties the aliases of the sit quest. Whoever was the sitter loses the package and gets up
+Function ReleaseSeat()
     _seat = None
-    If seat && companion.GetSitState() == SitStateSeated
-        seat.Activate(companion)
+    ReferenceAlias sitterAlias = GetSitAlias(SitAliasSitter)
+    ReferenceAlias seatAlias = GetSitAlias(SitAliasSeat)
+    If !sitterAlias || !seatAlias
+        Return
+    EndIf
+    Actor sitter = sitterAlias.GetActorReference()
+    sitterAlias.Clear()
+    seatAlias.Clear()
+    If sitter
+        sitter.EvaluatePackage()
     EndIf
 EndFunction
 
 ; ----------------------------------------------------------------------- walk
-; move_to: the companion walks to a character or a thing and waits there. loot and sit walk the same way
+; move_to: the companion walks to a character or a thing and waits there. loot walks the same way.
+; sit does not: there the package of the sit quest does the walking (see OnSitRequested)
 
-; Raised by DoCommand. numArg is the number of the command that asked for the walk
+; Starts the walk to _walkTarget, and the watch over it. Called by DoCommand and StartLoot
+Function StartWalk()
+    _walkRestartCount = 0
+    SendModEvent(EVENT_WALK, "", _walkNumber as float)
+    SendModEvent(EVENT_WALK_WATCH, "", _walkNumber as float)
+EndFunction
+
+; Raised by StartWalk. numArg is the number of the command that asked for the walk
 Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender)
     int ownWalkNumber = numArg as int
     Actor companion = GetCompanion()
@@ -1135,13 +1364,18 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     If ownWalkNumber != _walkNumber || !companion || !walkTarget
         Return
     EndIf
-    bool isSitWalk = _isSitWalk
     bool isLootWalk = _isLootWalk
     Form lootItem = _lootItem
+    ; The command has just told the companion to wait. The game gets a moment to be done with that,
+    ; because a walk that was started right away sometimes never began
+    Utility.Wait(WalkStartPauseSeconds)
+    If ownWalkNumber != _walkNumber
+        Return
+    EndIf
     ; This call only comes back when the companion has arrived, found no way or was sent somewhere else
     bool hasArrived = companion.PathToReference(walkTarget, WalkSpeed)
     If ownWalkNumber != _walkNumber
-        ; A newer command has taken over in the meantime
+        ; A newer command has taken over in the meantime, or the watch has started the walk again
         Return
     EndIf
     _walkTarget = None
@@ -1151,15 +1385,55 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         FinishLoot(companion, walkTarget, lootItem, ownWalkNumber, hasArrived)
         Return
     EndIf
-    If isSitWalk
-        _isSitWalk = false
-        FinishSitting(companion, walkTarget, ownWalkNumber)
-        Return
-    EndIf
     If !hasArrived
         AddReport("You did not get to " + walkTarget.GetDisplayName() + ".")
         Debug.Notification("AI companion: did not get to " + walkTarget.GetDisplayName())
     EndIf
+EndEvent
+
+; Raised together with the walk. In the game a walk sometimes never started: the companion stood still,
+; and the call in OnWalkRequested never came back, so the state said "walking to" for good.
+; So this looks after a few seconds whether the companion got going. If not, the walk is started again,
+; and after WalkRestarts tries it is given up: loot then takes the things from where the companion stands
+Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownWalkNumber = numArg as int
+    Actor companion = GetCompanion()
+    ObjectReference walkTarget = _walkTarget
+    If ownWalkNumber != _walkNumber || !companion || !walkTarget
+        Return
+    EndIf
+    float startX = companion.GetPositionX()
+    float startY = companion.GetPositionY()
+    Utility.Wait(WalkStartPauseSeconds + WalkWatchSeconds)
+    If ownWalkNumber != _walkNumber || _walkTarget != walkTarget
+        ; The walk is over, or a newer command has taken over
+        Return
+    EndIf
+    float movedX = companion.GetPositionX() - startX
+    float movedY = companion.GetPositionY() - startY
+    If movedX * movedX + movedY * movedY >= WalkStartedUnits * WalkStartedUnits
+        Return
+    EndIf
+
+    ; The companion has not moved. The walk that hangs finds a new number if it ever comes back, and stays silent
+    _walkNumber += 1
+    If _walkRestartCount < WalkRestarts
+        _walkRestartCount += 1
+        companion.EvaluatePackage()
+        SendModEvent(EVENT_WALK, "", _walkNumber as float)
+        SendModEvent(EVENT_WALK_WATCH, "", _walkNumber as float)
+        Return
+    EndIf
+    _walkTarget = None
+    If _isLootWalk
+        Form lootItem = _lootItem
+        _isLootWalk = false
+        _lootItem = None
+        FinishLoot(companion, walkTarget, lootItem, _walkNumber, false)
+        Return
+    EndIf
+    AddReport("You did not get going towards " + walkTarget.GetDisplayName() + ". Try 'move_to' again, or 'follow'.")
+    Debug.Notification("AI companion: did not get going towards " + walkTarget.GetDisplayName())
 EndEvent
 
 ; A walk that is still running finds a new number when it comes back and then stays silent
@@ -1169,6 +1443,7 @@ Function EndWalk()
     _isSitWalk = false
     _isLootWalk = false
     _lootItem = None
+    _walkRestartCount = 0
 EndFunction
 
 ; ----------------------------------------------------------------------- flee

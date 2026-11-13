@@ -1,0 +1,21 @@
+FormKey: 000801:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_SitQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 100
+NextAliasID: 2
+Aliases:
+- Name: Sitter
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000802:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: Seat
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null
