@@ -110,7 +110,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 9 AutoReadOnly
+int Property ProtocolNumber = 10 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -257,6 +257,22 @@ float Property SayStillMovedUnits = 12.0 AutoReadOnly
 float Property SayStillNearUnits = 450.0 AutoReadOnly
 ; say: own event that watches a companion that moves its hands while it talks, and ends that as soon as it has to walk
 string Property EVENT_SAY_WATCH = "KI_MCP_Gefaehrte_SayWatch" AutoReadOnly
+; say to a character other than the player: own event that stops the companion, walks it over if the character is
+; further away than SayApproachUnits (at most SayApproachSeconds), turns it and only then lets it speak
+string Property EVENT_SAY_APPROACH = "KI_MCP_Gefaehrte_SayApproach" AutoReadOnly
+float Property SayApproachUnits = 350.0 AutoReadOnly
+float Property SayApproachSeconds = 15.0 AutoReadOnly
+float Property SayApproachCheckSeconds = 0.25 AutoReadOnly
+float Property SayStopSeconds = 0.5 AutoReadOnly
+; The companion turns its whole body to whom it speaks to if that one is further to the side than this
+float Property SayTurnDegrees = 15.0 AutoReadOnly
+; How long after the end of the sound the eyes, face and stance go back (as the server does with say_end)
+float Property SayEndExtraSeconds = 0.4 AutoReadOnly
+; say: how long the sound of the sentence is in milliseconds (0 = not known)
+string Property KEY_COMMAND_SAY_MS = "companion_say_ms" AutoReadOnly
+; move_to: a plain walk counts as done once the companion stands this close to where it was to stop. The call of the
+; game that does the walk (PathToReference) does not always come back after the companion has arrived
+float Property WalkArrivedUnits = 210.0 AutoReadOnly
 ; run: 1 in the command = run instead of walk (move_to, move, enter, follow)
 string Property KEY_COMMAND_RUN = "companion_run" AutoReadOnly
 ; run: why the companion is in the alias "Walker" of the lead quest although it follows nobody because of follow with
@@ -357,6 +373,18 @@ bool _isSayFaceSet = false
 bool _isSayPoseHeld = false
 ; say: whether the watch over a companion that moves its hands while it talks is running (see OnSayWatchRequested)
 bool _isSayWatchRunning = false
+; say to another character (see OnSayApproachRequested): whether a sentence waits until the companion has turned or
+; walked over, to whom, its line, the look and the animation for its hands, how long it is, and whether the companion
+; follows the player again afterwards
+bool _isSayDelayed = false
+Actor _sayApproachTarget
+Topic _sayApproachTopic
+int _sayApproachMood = -1
+string _sayApproachTalk = ""
+int _sayApproachIdleHigh = 0
+int _sayApproachIdleLow = 0
+int _sayApproachMs = 0
+bool _isSayApproachFollowing = false
 ; run: whether the walk that was just started is to be run, why the companion is in the lead quest for running
 ; (see RunModeNone), and the number of the watch over following that counts (an older one ends itself)
 bool _isRunWanted = false
@@ -453,6 +481,7 @@ Function StartLoop()
     RegisterForModEvent(EVENT_WALK_WATCH, "OnWalkWatchRequested")
     RegisterForModEvent(EVENT_SIT, "OnSitRequested")
     RegisterForModEvent(EVENT_SAY_WATCH, "OnSayWatchRequested")
+    RegisterForModEvent(EVENT_SAY_APPROACH, "OnSayApproachRequested")
     RegisterForModEvent(EVENT_FOLLOW_WATCH, "OnFollowWatchRequested")
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
     ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
@@ -468,6 +497,7 @@ Function StartLoop()
     _isSayFaceSet = false
     _isSayPoseHeld = false
     _isSayWatchRunning = false
+    _isSayDelayed = false
     ; The watch over following starts anew with every loaded game. The one from before finds a new number and ends
     _followWatchNumber += 1
     SendModEvent(EVENT_FOLLOW_WATCH, "", _followWatchNumber as float)
@@ -1340,6 +1370,13 @@ int Function RunCommand(int commandHandle, string actionName)
             If !isSubtitleSet && sayWords != ""
                 Debug.Notification(companion.GetDisplayName() + ": " + sayWords)
             EndIf
+            ; To another character the companion first stops, walks over if needed and turns, then it speaks.
+            ; That runs beside the loop (see OnSayApproachRequested)
+            string approachText = StartSayApproach(companion, commandHandle, sayTopic)
+            If approachText != ""
+                resultText = approachText
+                Return MakeResult(commandHandle, isOk, resultText)
+            EndIf
             ; First the eyes, then the words and the face. Turning the body and moving the hands only come
             ; if the companion really stands around: finding that out takes a moment (see IsStandingAround)
             string lookNote = StartSayLook(companion, commandHandle)
@@ -1361,7 +1398,8 @@ int Function RunCommand(int commandHandle, string actionName)
     ElseIf actionName == ACTION_SAY_END
         ; The sentence is over, the server knows how long its sound is
         isOk = true
-        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber
+        ; A sentence that waits for the companion to turn or walk over ends on its own (see OnSayApproachRequested)
+        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0) == _sayNumber && !_isSayDelayed
             ReleaseSay(companion)
         EndIf
         resultText = "ok"
@@ -1462,7 +1500,7 @@ int Function RunCommand(int commandHandle, string actionName)
         ElseIf faceDegrees < 0
             resultText = "face needs a target or a direction."
         EndIf
-        If resultText == "" && (_walkTarget || companion.IsInCombat() || companion.GetSitState() != 0)
+        If resultText == "" && (IsWalking(companion) || companion.IsInCombat() || companion.GetSitState() != 0)
             resultText = "You cannot turn on the spot while you walk, fight or sit."
         EndIf
         If resultText == ""
@@ -1586,6 +1624,11 @@ int Function RunCommand(int commandHandle, string actionName)
         resultText = resultText + StartRunning(companion, actionName)
     EndIf
 
+    Return MakeResult(commandHandle, isOk, resultText)
+EndFunction
+
+; The result of a command for the server
+int Function MakeResult(int commandHandle, bool isOk, string resultText)
     int resultHandle = SKSE_HTTP.createDictionary()
     SKSE_HTTP.setString(resultHandle, KEY_COMMAND_ID, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_ID, ""))
     SKSE_HTTP.setBool(resultHandle, KEY_RESULT_OK, isOk)
@@ -1813,7 +1856,7 @@ string Function DoLookAt(Actor companion, ObjectReference target)
     _lookTarget = target
     ; The head only turns so far. If the target is further to the side and the companion stands around, the body turns as well
     float angle = companion.GetHeadingAngle(target)
-    If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && !_walkTarget && !companion.IsInCombat() && companion.GetSitState() == 0
+    If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && !IsWalking(companion) && !companion.IsInCombat() && companion.GetSitState() == 0
         companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
     EndIf
     Return "You look at " + target.GetDisplayName() + " now. 'look_at' without a target lets you look around freely again."
@@ -1826,7 +1869,7 @@ EndFunction
 ; Whether the companion could stand around: not walking somewhere, not running to catch up, not fighting, not sitting,
 ; and not moving as far as the game tells right away. (follow with run is looked at like any following: see IsStandingAround)
 bool Function IsHoldingStill(Actor companion)
-    If _walkTarget || _runMode == RunModeWalk || _runMode == RunModeCatchUp || companion.IsInCombat() || companion.GetSitState() != 0
+    If IsWalking(companion) || _runMode == RunModeWalk || _runMode == RunModeCatchUp || companion.IsInCombat() || companion.GetSitState() != 0
         Return false
     EndIf
     Return companion.GetAnimationVariableFloat(SpeedVariable) < StandingSpeedLimit
@@ -1877,6 +1920,7 @@ EndFunction
 ; the player. A look_at of the AI that still holds stays if say names no target.
 ; Returns what to add to the result for the AI ("" = nothing)
 string Function StartSayLook(Actor companion, int commandHandle)
+    _isSayDelayed = false
     _sayNumber = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0)
     string lookText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
     ObjectReference lookTarget = GetTargetForm(commandHandle) as ObjectReference
@@ -1935,9 +1979,11 @@ EndFunction
 ; or an animation ("Idle") by its ID, sent where loot has the ID of an item.
 ; Only call this for a companion that stands around (see IsStandingAround)
 Function PlaySayAnimation(Actor companion, int commandHandle)
-    string talkEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
-    int idleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
-    int idleLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+    PlayTalkAnimation(companion, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, ""), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0))
+EndFunction
+
+; The same with the animation given directly: the name of an animation event, or the two halves of the ID of an Idle
+Function PlayTalkAnimation(Actor companion, string talkEvent, int idleHigh, int idleLow)
     If talkEvent == "" && idleHigh == 0 && idleLow == 0
         Return
     EndIf
@@ -1976,6 +2022,112 @@ Event OnSayWatchRequested(string eventName, string strArg, float numArg, Form se
         EndIf
     EndWhile
     _isSayWatchRunning = false
+EndEvent
+
+; Whether the companion is on a walk. A plain walk of move_to counts as done once the companion stands close to where
+; it was to stop: then the walk is ended here. The walks of loot, enter, pick_up, sit and make_room still have
+; something to do at their end, so they only end on their own
+bool Function IsWalking(Actor companion)
+    ObjectReference walkTarget = _walkTarget
+    If !walkTarget
+        Return false
+    EndIf
+    If _isLootWalk || _isEnterWalk || _isRoomWalk || _isMoveWalk || _isPickUp || _isSitWalk || _runMode == RunModeWalk
+        Return true
+    EndIf
+    If companion.GetDistance(walkTarget) > WalkArrivedUnits || companion.GetAnimationVariableFloat(SpeedVariable) >= StandingSpeedLimit
+        Return true
+    EndIf
+    ; Arrived. What is still running of the walk finds a new number when it comes back and stays silent
+    EndWalk()
+    Return false
+EndFunction
+
+; say: if the companion speaks to a character other than the player, and neither fights, sits, walks somewhere nor
+; follows someone else, the sentence is handed to OnSayApproachRequested: the companion stops, walks over if needed,
+; turns and only then speaks. Returns the text for the AI, or "" if the sentence is to be spoken right away as always
+string Function StartSayApproach(Actor companion, int commandHandle, Topic sayTopic)
+    Actor target = GetTargetForm(commandHandle) as Actor
+    If !target || target == Game.GetPlayer() || target == companion || target.IsDead() || !target.Is3DLoaded() || !companion.Is3DLoaded()
+        Return ""
+    EndIf
+    If companion.IsInCombat() || companion.GetSitState() != 0 || IsWalking(companion) || _hasLeader
+        Return ""
+    EndIf
+    _sayNumber = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_NUMBER, 0)
+    _isSayDelayed = true
+    _sayApproachTarget = target
+    _sayApproachTopic = sayTopic
+    _sayApproachMood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1)
+    _sayApproachTalk = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
+    _sayApproachIdleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
+    _sayApproachIdleLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+    _sayApproachMs = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_MS, 0)
+    _isSayApproachFollowing = !IsWaiting(companion)
+    SendModEvent(EVENT_SAY_APPROACH, "", _sayNumber as float)
+    If companion.GetDistance(target) > SayApproachUnits
+        Return "You go over to " + target.GetDisplayName() + " and say it there."
+    EndIf
+    Return "You stop, turn to " + target.GetDisplayName() + " and say it."
+EndFunction
+
+; Raised by StartSayApproach. numArg is the number of the sentence: a newer sentence or command makes this one give up
+Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownNumber = numArg as int
+    Actor companion = GetCompanion()
+    Actor target = _sayApproachTarget
+    If !companion || !target || ownNumber != _sayNumber
+        Return
+    EndIf
+    bool wasFollowing = _isSayApproachFollowing
+    ; Stop. A companion that follows the player waits for the moment
+    If wasFollowing
+        SetWaiting(companion, true)
+        Utility.Wait(SayStopSeconds)
+    EndIf
+    If ownNumber != _sayNumber
+        Return
+    EndIf
+    ; Too far away to talk: walk over as move_to does, and stop a little in front
+    If companion.GetDistance(target) > SayApproachUnits
+        EndWalk()
+        StartMoveTo(companion, target, MoveToPersonMeters)
+        ObjectReference walkTarget = _walkTarget
+        float waited = 0.0
+        While walkTarget && _walkTarget == walkTarget && waited < SayApproachSeconds && ownNumber == _sayNumber
+            Utility.Wait(SayApproachCheckSeconds)
+            waited += SayApproachCheckSeconds
+            IsWalking(companion)
+        EndWhile
+        If ownNumber != _sayNumber
+            ; A newer command took over. It has ended the walk already if it needed to
+            Return
+        EndIf
+        If walkTarget && _walkTarget == walkTarget
+            ; Did not get there in time: the companion speaks from where it is
+            EndWalk()
+        EndIf
+    EndIf
+    ; Turn the whole body to whom it speaks to, look at them and speak
+    float angle = companion.GetHeadingAngle(target)
+    If angle > SayTurnDegrees || angle < -SayTurnDegrees
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+    EndIf
+    companion.SetLookAt(target)
+    _sayLookTarget = target
+    companion.Say(_sayApproachTopic)
+    StartSayFace(companion, _sayApproachMood)
+    PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
+    ; The server's say_end came too early for this sentence, so the end is waited for here
+    Utility.Wait((_sayApproachMs as float) / 1000.0 + SayEndExtraSeconds)
+    If ownNumber != _sayNumber
+        Return
+    EndIf
+    _isSayDelayed = false
+    ReleaseSay(companion)
+    If wasFollowing && IsWaiting(companion) && !_walkTarget
+        SetWaiting(companion, false)
+    EndIf
 EndEvent
 
 ; The sentence is over: the eyes go back to what look_at holds (or are free again), the face is the companion's own

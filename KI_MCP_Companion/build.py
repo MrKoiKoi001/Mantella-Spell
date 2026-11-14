@@ -14,6 +14,7 @@ Everything that is printed also goes to build\\build_log.txt.
 Only the Python standard library is used.
 """
 import argparse
+import configparser
 import glob
 import os
 import shutil
@@ -50,8 +51,20 @@ SILENCE_SECONDS = 0.2
 
 DEFAULT_CREATION_KIT_FOLDER = r"F:\SteamLibrary\steamapps\common\skyrim"
 DEFAULT_GAME_FOLDER = r"F:\SteamLibrary\steamapps\common\SkyrimVR"
+DEFAULT_GAME_FOLDER_SE = r"E:\SteamLibrary\steamapps\common\Skyrim Special Edition"
 # Folder below %LOCALAPPDATA% in which the game keeps plugins.txt
 DEFAULT_APPDATA_NAME = "Skyrim VR"
+DEFAULT_APPDATA_NAME_SE = "Skyrim Special Edition"
+# The settings of the companion server say which game is played: 'vr' (on = Skyrim VR, off = Skyrim Special Edition)
+# and the folders of the two games. The server keeps them next to itself, in the Mantella repository next to this one
+SETTINGS_SECTION = "companion"
+SETTINGS_KEY_VR = "vr"
+SETTINGS_KEY_GAME_FOLDER = "game_folder"
+SETTINGS_KEY_GAME_FOLDER_SE = "game_folder_se"
+SETTINGS_OFF_WORDS = ["off", "no", "false", "0"]
+# The Address Library is one file per version of the game: for Skyrim VR a table, for the other versions a packed file
+ADDRESS_LIBRARY_PATTERN = "version-*.csv"
+ADDRESS_LIBRARY_PATTERN_SE = "version*.bin"
 
 SPRIGGIT_VERSION = "0.41.0"
 SPRIGGIT_URL = "https://github.com/Mutagen-Modding/Spriggit/releases/download/" + SPRIGGIT_VERSION + "/SpriggitCLI.zip"
@@ -61,6 +74,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_FOLDER = os.path.dirname(HERE)
 OWN_SOURCE_FOLDER = os.path.join(HERE, "Scripts", "Source")
 OWN_PLUGINS_FOLDER = os.path.join(HERE, "SKSE", "Plugins")
+# SKSE_HTTP.dll of the Mantella repository is built with an old CommonLibSSE-NG that does not know the Address Library
+# of Skyrim Special Edition 1.7.99 and newer, so SKSE refuses it there. For Skyrim Special Edition the one of the
+# unofficial "Mantella 1.7.104 SKSE Plugin Fix" (Nexus, mod 195872) is taken from this folder instead
+SE_PLUGINS_FOLDER = os.path.join(HERE, "SKSE", "SE", "Plugins")
 MANTELLA_SOURCE_FOLDER = os.path.join(REPO_FOLDER, "Scripts", "Source")
 SPRIGGIT_DATA_FOLDER = os.path.join(HERE, "Spriggit_data")
 BUILD_FOLDER = os.path.join(HERE, "build")
@@ -276,9 +293,14 @@ def activate_plugin(plugins_file: str) -> None:
     say("Activated in " + plugins_file)
 
 
-def check_address_library(game_folder: str, skse_plugins_folder: str) -> None:
-    """The DLL only loads in Skyrim VR if the VR Address Library (a file version-....csv) is in SKSE\\Plugins"""
-    if len(glob.glob(os.path.join(skse_plugins_folder, "version-*.csv"))) > 0:
+def check_address_library(game_folder: str, skse_plugins_folder: str, is_vr: bool = True) -> None:
+    """The DLLs only load if the Address Library for this game is in SKSE\\Plugins: for Skyrim VR a file
+    version-....csv, for Skyrim Special Edition a file version....bin"""
+    pattern = ADDRESS_LIBRARY_PATTERN if is_vr else ADDRESS_LIBRARY_PATTERN_SE
+    if len(glob.glob(os.path.join(skse_plugins_folder, pattern))) > 0:
+        return
+    if not is_vr:
+        say("WARNING: No Address Library (" + pattern + ") in " + skse_plugins_folder + ". Without it " + HTTP_PLUGIN + " does not load.")
         return
     for current, folders, files in os.walk(game_folder):
         if current.count(os.sep) - game_folder.rstrip("\\/").count(os.sep) >= 3:
@@ -289,6 +311,29 @@ def check_address_library(game_folder: str, skse_plugins_folder: str) -> None:
                 copy_file(os.path.join(current, candidate), skse_plugins_folder)
                 return
     say("WARNING: No Address Library (version-....csv) in " + skse_plugins_folder + ". Without it " + HTTP_PLUGIN + " does not load.")
+
+
+def read_game_choice(settings_file: str) -> tuple:
+    """Reads from the settings of the companion server which game is played
+
+    Returns:
+        Whether it is Skyrim VR, the folder of that game, and one line that says where this came from.
+        Without the file it is Skyrim VR in its usual folder
+    """
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(settings_file, "r", encoding="utf-8-sig") as opened:
+            parser.read_file(opened)
+    except (OSError, configparser.Error, UnicodeDecodeError) as error:
+        return True, DEFAULT_GAME_FOLDER, "No settings read from " + settings_file + " (" + str(error) + "), so the game is Skyrim VR"
+
+    def read(key: str) -> str:
+        return parser.get(SETTINGS_SECTION, key, fallback="").strip().strip('"').strip()
+
+    is_vr = read(SETTINGS_KEY_VR).lower() not in SETTINGS_OFF_WORDS
+    if is_vr:
+        return True, read(SETTINGS_KEY_GAME_FOLDER) or DEFAULT_GAME_FOLDER, "Skyrim VR, as " + settings_file + " says (vr = on)"
+    return False, read(SETTINGS_KEY_GAME_FOLDER_SE) or DEFAULT_GAME_FOLDER_SE, "Skyrim Special Edition, as " + settings_file + " says (vr = off)"
 
 
 def read_voice_folders() -> List[str]:
@@ -345,7 +390,7 @@ def install_seq_file(data_folder: str) -> None:
     say("Written " + seq_file)
 
 
-def install(game_folder: str, plugins_file: str, compiled_files: List[str], plugin: str) -> None:
+def install(game_folder: str, plugins_file: str, compiled_files: List[str], plugin: str, is_vr: bool = True) -> None:
     data_folder = os.path.join(game_folder, "Data")
     if not os.path.isdir(data_folder):
         raise BuildError("No Data folder in " + game_folder + ". Pass the game folder with --game <folder>.")
@@ -355,14 +400,20 @@ def install(game_folder: str, plugins_file: str, compiled_files: List[str], plug
     copy_file(plugin, data_folder)
     for compiled_file in compiled_files:
         copy_file(compiled_file, os.path.join(data_folder, "Scripts"))
-    copy_file(os.path.join(REPO_FOLDER, "SKSE", "Plugins", HTTP_PLUGIN), skse_plugins_folder)
+    http_plugin = os.path.join(REPO_FOLDER, "SKSE", "Plugins", HTTP_PLUGIN)
+    if not is_vr:
+        http_plugin = os.path.join(SE_PLUGINS_FOLDER, HTTP_PLUGIN)
+        if not os.path.isfile(http_plugin):
+            raise BuildError(http_plugin + " is missing. Skyrim Special Edition needs the SKSE_HTTP.dll of the "
+                             "'Mantella 1.7.104 SKSE Plugin Fix' (Nexus) in " + SE_PLUGINS_FOLDER + ".")
+    copy_file(http_plugin, skse_plugins_folder)
     native_plugin = os.path.join(OWN_PLUGINS_FOLDER, NATIVE_PLUGIN)
     if os.path.isfile(native_plugin):
         copy_file(native_plugin, skse_plugins_folder)
     else:
         say("NOTE: " + native_plugin + " is missing. The mod works without it, but the AI does not get the quests. "
             "Download the DLL from the last successful build of the plugin repository on GitHub (Actions, Artifacts) and put it there.")
-    check_address_library(game_folder, skse_plugins_folder)
+    check_address_library(game_folder, skse_plugins_folder, is_vr)
     install_voice_folders(data_folder)
     install_seq_file(data_folder)
     activate_plugin(plugins_file)
@@ -375,18 +426,27 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Builds the companion mod (scripts and plugin)")
     parser.add_argument("--install", action="store_true", help="Copy the result into the game folder and activate the plugin")
     parser.add_argument("--creation-kit", default=DEFAULT_CREATION_KIT_FOLDER, help="Folder of the Creation Kit (default: %(default)s)")
-    parser.add_argument("--game", default=DEFAULT_GAME_FOLDER, help="Folder of the game (default: %(default)s)")
-    parser.add_argument("--plugins-file", default=os.path.join(os.environ.get("LOCALAPPDATA", ""), DEFAULT_APPDATA_NAME, "plugins.txt"),
-                        help="The plugins.txt of the game (default: %(default)s)")
+    parser.add_argument("--settings", default=os.path.join(os.path.dirname(REPO_FOLDER), "Mantella", "companion.ini"),
+                        help="The settings of the companion server, which say whether the game is Skyrim VR or Skyrim Special Edition "
+                             "and where it is (default: %(default)s)")
+    parser.add_argument("--game", default="", help="Folder of the game (default: the one the settings name)")
+    parser.add_argument("--plugins-file", default="", help="The plugins.txt of the game (default: the one of the game the settings name, below %%LOCALAPPDATA%%)")
     arguments = parser.parse_args()
+    is_vr, settings_game_folder, game_note = read_game_choice(arguments.settings)
+    if arguments.game == "":
+        arguments.game = settings_game_folder
+    if arguments.plugins_file == "":
+        arguments.plugins_file = os.path.join(os.environ.get("LOCALAPPDATA", ""), DEFAULT_APPDATA_NAME if is_vr else DEFAULT_APPDATA_NAME_SE, "plugins.txt")
 
     os.makedirs(BUILD_FOLDER, exist_ok=True)
     log_handle = open(LOG_FILE, "w", encoding="utf-8")
     try:
+        say("Game: " + game_note)
+        say("Game folder: " + arguments.game)
         compiled_files = compile_scripts(arguments.creation_kit, arguments.game)
         plugin = build_plugin()
         if arguments.install:
-            install(arguments.game, arguments.plugins_file, compiled_files, plugin)
+            install(arguments.game, arguments.plugins_file, compiled_files, plugin, is_vr)
         say()
         if arguments.install:
             say("DONE. Built and installed. Start the game through the SKSE loader.")
