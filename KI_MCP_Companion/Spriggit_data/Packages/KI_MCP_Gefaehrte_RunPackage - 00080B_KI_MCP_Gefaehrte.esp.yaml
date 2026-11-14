@@ -1,6 +1,7 @@
 FormKey: 00080B:KI_MCP_Gefaehrte.esp
 EditorID: KI_MCP_Gefaehrte_RunPackage
 Flags:
+- 0x2000
 - AllowSwimming
 Type: Package
 PreferredSpeed: Run

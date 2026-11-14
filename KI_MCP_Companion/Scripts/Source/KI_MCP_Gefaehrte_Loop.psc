@@ -23,6 +23,13 @@ float Property NearbyRadiusMeters = 50.0 AutoReadOnly
 int Property NativeVersionWithAround = 11 AutoReadOnly
 ; From interface version 12 on the SKSE plugin can cut off what the game lets the companion say on its own (SetMutedSpeaker)
 int Property NativeVersionWithMute = 12 AutoReadOnly
+; From interface version 13 on the rays of the SKSE plugin can look into one direction, as far and as wide as is asked for
+; (GetSurroundingsToward), and the plugin tells how high the ground is at a spot (GetGroundHeight)
+int Property NativeVersionWithLook = 13 AutoReadOnly
+; What GetGroundHeight returns if it finds no ground. Anything above GroundHeightLowest is a real height
+float Property GroundHeightLowest = -900000.0 AutoReadOnly
+; A look all around: the rays go into eight directions, the first one straight ahead of the companion
+int Property SpaceFullCircleDegrees = 360 AutoReadOnly
 float Property NearbyOutdoorRadiusMeters = 200.0 AutoReadOnly
 ; Outdoors the world is cut into cells, and only the cell the player stands in can be listed completely.
 ; To also catch characters in the cells next to it, this many random characters in reach are drawn in addition
@@ -243,6 +250,13 @@ string Property KEY_COMMAND_STATS = "companion_stats" AutoReadOnly
 string Property KEY_COMMAND_VISIBLE = "companion_visible" AutoReadOnly
 ; For report_state: 1 if the state should carry what the rays of the plugin find around the companion
 string Property KEY_COMMAND_SPACE = "companion_space" AutoReadOnly
+; For report_state with companion_space: how far the rays reach in meters (0 = SurroundingsMeters), the direction they
+; look into in degrees (-1 = none: all around, beginning straight ahead), 1 if those degrees count from where the
+; companion faces (otherwise from north), and over how many degrees the rays fan out around that direction
+string Property KEY_COMMAND_SPACE_METERS = "companion_space_meters" AutoReadOnly
+string Property KEY_COMMAND_SPACE_DEGREES = "companion_space_degrees" AutoReadOnly
+string Property KEY_COMMAND_SPACE_FACING = "companion_space_facing" AutoReadOnly
+string Property KEY_COMMAND_SPACE_ANGLE = "companion_space_angle" AutoReadOnly
 ; For report_state: a name, or a part of one, to look for in the whole loaded area (empty = no search)
 string Property KEY_COMMAND_FIND = "companion_find" AutoReadOnly
 ; say: the animation event that moves the hands of the companion while it talks ("" = none)
@@ -461,6 +475,11 @@ bool _wantedStats = false
 bool _wantedVisible = false
 ; Whether it asked for what the rays find around the companion. Used up by BuildState
 bool _wantedSpace = false
+; How it wants the rays to look (see KEY_COMMAND_SPACE_METERS and the keys after it). They hold as long as _wantedSpace does
+int _wantedSpaceMeters = 0
+int _wantedSpaceDegrees = -1
+bool _wantedSpaceFromFacing = false
+int _wantedSpaceAngle = 360
 ; The name it asked to look for in the whole loaded area ("" = none). Used up by BuildState
 string _wantedFind = ""
 ; While BuildState collects the characters nearby: whether only those the viewer can see go into the list
@@ -758,7 +777,41 @@ int Function BuildState()
         ; Only when the server asked for it: walls, rising ground and drops around the companion, found by rays.
         ; Always seen from the companion, because it is the companion that walks by them (see the command move)
         If isSpaceWanted && companion && companion.Is3DLoaded()
-            int[] spaceValues = KI_MCP_Gefaehrte_Native.GetSurroundings(companion, SurroundingsMeters)
+            int[] spaceValues
+            If _nativeVersion >= NativeVersionWithLook
+                ; The direction the rays look into as a point of the compass, and how wide they fan out.
+                ; Without a direction they go all around, the first one straight ahead
+                int facingDegrees = companion.GetAngleZ() as int
+                int spaceHeading = facingDegrees
+                int spaceAngle = SpaceFullCircleDegrees
+                If _wantedSpaceDegrees >= 0
+                    spaceHeading = _wantedSpaceDegrees
+                    If _wantedSpaceFromFacing
+                        spaceHeading += facingDegrees
+                    EndIf
+                    spaceAngle = _wantedSpaceAngle
+                EndIf
+                spaceHeading = spaceHeading % SpaceFullCircleDegrees
+                If spaceHeading < 0
+                    spaceHeading += SpaceFullCircleDegrees
+                EndIf
+                int spaceMeters = _wantedSpaceMeters
+                If spaceMeters <= 0
+                    spaceMeters = SurroundingsMeters
+                EndIf
+                spaceValues = KI_MCP_Gefaehrte_Native.GetSurroundingsToward(companion, spaceMeters, spaceHeading, spaceAngle)
+                ; How the rays looked, so that the server can name the direction of each: the middle of the look as a
+                ; point of the compass in degrees, the angle the rays fan out over, how far they reach in meters,
+                ; and where the companion faces in degrees
+                int[] spaceInfo = new int[4]
+                spaceInfo[0] = spaceHeading
+                spaceInfo[1] = spaceAngle
+                spaceInfo[2] = spaceMeters
+                spaceInfo[3] = facingDegrees
+                SKSE_HTTP.setIntArray(stateHandle, "space_info", spaceInfo)
+            Else
+                spaceValues = KI_MCP_Gefaehrte_Native.GetSurroundings(companion, SurroundingsMeters)
+            EndIf
             If spaceValues.Length > 0
                 SKSE_HTTP.setIntArray(stateHandle, "space", spaceValues)
             EndIf
@@ -1297,6 +1350,10 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedStats = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_STATS, 0) != 0
             _wantedVisible = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_VISIBLE, 0) != 0
             _wantedSpace = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE, 0) != 0
+            _wantedSpaceMeters = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_METERS, 0)
+            _wantedSpaceDegrees = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_DEGREES, -1)
+            _wantedSpaceFromFacing = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_FACING, 0) != 0
+            _wantedSpaceAngle = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_ANGLE, SpaceFullCircleDegrees)
             _wantedFind = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_FIND, "")
             _isMuteWanted = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_MUTE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
@@ -2566,6 +2623,16 @@ Function StartMarkerWalk(Actor companion, ObjectReference roomMarker, float step
     _roomStartX = companion.GetPositionX()
     _roomStartY = companion.GetPositionY()
     roomMarker.MoveTo(companion, stepX * stepUnits, stepY * stepUnits, 0.0, false)
+    ; The marker now is at the height of the companion. Where the ground is not level it hangs in the air there or
+    ; sticks in the ground, and the game may find no way to it. So it is put onto the ground, if the plugin can tell where that is
+    If _nativeVersion >= NativeVersionWithLook
+        float markerX = roomMarker.GetPositionX()
+        float markerY = roomMarker.GetPositionY()
+        float groundHeight = KI_MCP_Gefaehrte_Native.GetGroundHeight(companion, markerX, markerY)
+        If groundHeight > GroundHeightLowest
+            roomMarker.SetPosition(markerX, markerY, groundHeight)
+        EndIf
+    EndIf
     _isRoomWalk = true
     _walkTarget = roomMarker
     StartWalk()
@@ -2950,8 +3017,11 @@ EndFunction
 
 ; ------------------------------------------------------------------------ run
 ; A character only runs if a package of the game tells it to: Actor.PathToReference, which does the walks of this mod,
-; only ever walks. The package of the lead quest (follow with a target) has "Run" as its speed. So for running the
-; companion is put into the alias "Walker" of that quest, and whom or what it is to run to into the alias "Leader"
+; only ever walks. To run to a place the companion is put into the alias "Runner" of the run quest, and what it is to
+; run to into the alias "Target": the travel package of that alias has "Run" as its preferred speed. The game only goes
+; by that speed if the package also carries the flag "Preferred Speed" (0x2000), without it the companion walks.
+; To keep up with someone (follow, catching up) the companion is put into the alias "Walker" of the lead quest instead:
+; a follow package runs on its own when the one it follows is far ahead
 
 ; One of the two aliases of the run quest (RunAliasRunner or RunAliasTarget), or None if the quest is missing
 ReferenceAlias Function GetRunAlias(int aliasId)
@@ -3303,6 +3373,9 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
     _walkTarget = None
     ObjectReference shownTarget = _walkShownTarget
     _walkShownTarget = None
+    ; A run that was part of this walk is given up with it. Without this the companion would keep the package for running
+    _isRunWanted = false
+    StopRunning()
     If _isLootWalk
         Form lootItem = _lootItem
         _isLootWalk = false

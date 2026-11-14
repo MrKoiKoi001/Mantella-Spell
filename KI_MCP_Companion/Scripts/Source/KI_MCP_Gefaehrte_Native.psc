@@ -130,3 +130,18 @@ Actor[] Function GetCharactersAround(Actor origin, int radiusMeters, int maxChar
 ; Grunts and cries stay, so do the lines of this mod (say) and what the character answers in the dialogue menu.
 ; Returns whether the plugin can do that at all (it has to listen to the subtitles for it, see IsHearing)
 bool Function SetMutedSpeaker(Actor speaker) global native
+
+; The two functions below exist from interface version 13 on
+
+; Like GetSurroundings, but looking into one direction: the rays fan out over angleDegrees around headingDegrees
+; (a point of the compass in degrees, 0 = north, 90 = east), from the left edge of that angle to the right one, with the
+; middle ray straight into the direction. Always an odd number of rays, about 15 degrees apart, at least 3 and at most 9.
+; An angle of 0 is one single ray. A full circle (360) is eight rays, the first into the direction and the others
+; clockwise from there. rangeMeters: 0 = 15, at most 200 (the game only has the physics of the area it has loaded
+; around the player, outdoors about 120 meters, and a ray finds nothing beyond that). Three numbers per ray, as
+; GetSurroundings gives them. Empty if the game cannot tell
+int[] Function GetSurroundingsToward(Actor origin, int rangeMeters, int headingDegrees, int angleDegrees) global native
+
+; How high the ground is at the spot x, y (game units) close to the character "origin", found by a ray downwards:
+; the height to put something at that a character is to walk to. -1000000 if the ray finds no ground there
+float Function GetGroundHeight(Actor origin, float x, float y) global native
