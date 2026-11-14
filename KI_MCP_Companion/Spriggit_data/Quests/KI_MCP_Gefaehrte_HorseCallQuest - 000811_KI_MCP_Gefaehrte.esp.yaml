@@ -1,0 +1,21 @@
+FormKey: 000811:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_HorseCallQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 120
+NextAliasID: 2
+Aliases:
+- Name: CalledHorse
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000812:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: CallTarget
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null

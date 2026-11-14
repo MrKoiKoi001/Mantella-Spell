@@ -338,6 +338,50 @@ string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
 string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
 string Property ACTION_LOOT = "loot" AutoReadOnly
+; Riding. claim_horse: the horse named as the target is the companion's own from now on. mount: the companion gets on
+; its horse and rides after the player. dismount: it gets off. ride_lock: with "on" in the detail the companion no
+; longer mounts and dismounts when the player does, with "off" it does again
+string Property ACTION_CLAIM_HORSE = "claim_horse" AutoReadOnly
+string Property ACTION_MOUNT = "mount" AutoReadOnly
+string Property ACTION_DISMOUNT = "dismount" AutoReadOnly
+string Property ACTION_RIDE_LOCK = "ride_lock" AutoReadOnly
+string Property RIDE_LOCK_OFF = "off" AutoReadOnly
+; call_horse: the horse of the companion or the horse of the player runs to the player and stays there
+string Property ACTION_CALL_HORSE = "call_horse" AutoReadOnly
+; The quest that knows the horse of the player: the alias "PlayersHorse" holds the horse the player rode last
+; and keeps it where it is left
+int Property PlayerHorseQuestFormId = 0x0000080F AutoReadOnly
+int Property PlayerHorseAliasHorse = 0 AutoReadOnly
+; The quest for calling a horse: the alias "CalledHorse" has a package that runs to the alias "CallTarget" (the player).
+; Its priority is above the quests that make the horses stay
+int Property HorseCallQuestFormId = 0x00000811 AutoReadOnly
+int Property HorseCallAliasHorse = 0 AutoReadOnly
+int Property HorseCallAliasTarget = 1 AutoReadOnly
+; A called horse has arrived once it is this close to the player. The watch looks every HorseCallWatchSeconds and
+; gives up after HorseCallMaxSeconds. A horse that is not in the loaded area is put HorseCallBesideUnits beside the player
+float Property HorseCallDoneUnits = 350.0 AutoReadOnly
+float Property HorseCallWatchSeconds = 1.0 AutoReadOnly
+int Property HorseCallMaxSeconds = 60 AutoReadOnly
+float Property HorseCallBesideUnits = 200.0 AutoReadOnly
+string Property EVENT_HORSE_CALL = "KI_MCP_Gefaehrte_HorseCall" AutoReadOnly
+; The quest for riding: the alias "Rider" has a package that follows the player on horseback, the alias
+; "FollowersHorse" holds the horse of the companion and keeps it where it is left, the alias "Leader" holds the player
+int Property HorseQuestFormId = 0x0000080C AutoReadOnly
+int Property HorseAliasRider = 0 AutoReadOnly
+int Property HorseAliasHorse = 1 AutoReadOnly
+int Property HorseAliasLeader = 2 AutoReadOnly
+; What the game calls a horse (a keyword of its race)
+string Property HorseKeyword = "ActorTypeHorse" AutoReadOnly
+; A horse that is further away than this when the companion is to mount is put next to the companion,
+; HorseBesideUnits to its side. A moment later the companion is told to get on, if it has not done so on its own
+float Property HorseSummonUnits = 512.0 AutoReadOnly
+float Property HorseBesideUnits = 100.0 AutoReadOnly
+float Property MountHelpSeconds = 2.0 AutoReadOnly
+string Property EVENT_MOUNT_HELP = "KI_MCP_Gefaehrte_MountHelp" AutoReadOnly
+; From interface version 14 on the SKSE plugin tells which horse a character rides (GetMount)
+int Property NativeVersionWithMount = 14 AutoReadOnly
+; What goes to the server as the name of a mount the game mod cannot name
+string Property UnknownMountName = "?" AutoReadOnly
 ; cast_spell: the companion casts a spell it knows, at once, without the movement of the hands and without paying magicka.
 ; Which spell: its ID in the two halves of the item, or else its name in the detail. On whom: the target, or nobody
 string Property ACTION_CAST_SPELL = "cast_spell" AutoReadOnly
@@ -387,6 +431,15 @@ bool _isGesturing = false
 Quest _leadQuest
 ; The run quest of this mod, looked up once
 Quest _runQuest
+Quest _horseQuest
+Quest _playerHorseQuest
+Quest _horseCallQuest
+; Every call of a horse gets a new number, so that the watch of an earlier call notices that it is over
+int _horseCallNumber = 0
+; Whether the companion keeps to itself when the player mounts or dismounts (ride_lock)
+bool _isRideLocked = false
+; Whether the player sat on a mount the last time the follow watch looked
+bool _wasPlayerRiding = false
 Actor _leader
 bool _hasLeader = false
 ; enter: the walk that is running leads to a door the companion is to go through, and the door it went through last
@@ -518,6 +571,8 @@ Function StartLoop()
     RegisterForModEvent(EVENT_SAY_WATCH, "OnSayWatchRequested")
     RegisterForModEvent(EVENT_SAY_APPROACH, "OnSayApproachRequested")
     RegisterForModEvent(EVENT_FOLLOW_WATCH, "OnFollowWatchRequested")
+    RegisterForModEvent(EVENT_MOUNT_HELP, "OnMountHelpRequested")
+    RegisterForModEvent(EVENT_HORSE_CALL, "OnHorseCallRequested")
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
     ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
     StopFleeing()
@@ -881,6 +936,13 @@ int Function BuildState()
     If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
         AddInventoryToState(stateHandle, companion, "inventory_own")
         AddSpellsToState(stateHandle, companion)
+    EndIf
+    ; On what the player and the companion sit, and where the horse of the companion is
+    AddSeatToState(stateHandle, player, "player")
+    AddPlayerHorseToState(stateHandle, player)
+    If companion
+        AddSeatToState(stateHandle, companion, "companion")
+        AddHorseToState(stateHandle, companion)
     EndIf
     If wantedInventory == INVENTORY_CORPSE
         AddCorpseToState(stateHandle, _wantedCorpse)
@@ -1484,12 +1546,74 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
+    ; wait from the saddle: the companion gets off and waits on foot, because only its riding package keeps it up there
+    If companion && actionName == ACTION_WAIT && IsRideWanted()
+        StopRiding(companion)
+    EndIf
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
+    ElseIf (IsRideWanted() || companion.IsOnMount()) && IsOnFootAction(actionName, commandHandle)
+        resultText = "You sit on your horse, and this is something you do on foot. Get off first with dismount."
+    ElseIf actionName == ACTION_CLAIM_HORSE
+        string horseText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        Actor wantedHorse = GetTargetForm(commandHandle) as Actor
+        resultText = GetHorseProblem(wantedHorse, horseText)
+        If resultText == ""
+            isOk = true
+            resultText = ClaimHorse(companion, wantedHorse)
+        EndIf
+    ElseIf actionName == ACTION_MOUNT
+        ; With a target the companion takes that horse as its own first
+        string mountText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        If mountText != ""
+            Actor namedHorse = GetTargetForm(commandHandle) as Actor
+            resultText = GetHorseProblem(namedHorse, mountText)
+            If resultText == ""
+                ClaimHorse(companion, namedHorse)
+            EndIf
+        EndIf
+        If resultText == ""
+            resultText = GetRideProblem(companion)
+        EndIf
+        If resultText == ""
+            isOk = true
+            resultText = StartRiding(companion)
+        EndIf
+    ElseIf actionName == ACTION_DISMOUNT
+        If !IsRideWanted() && !companion.IsOnMount()
+            resultText = "You are not on a horse."
+        Else
+            isOk = true
+            StopRiding(companion)
+            resultText = "You get off your horse. It stays where it is."
+        EndIf
+    ElseIf actionName == ACTION_CALL_HORSE
+        ; Without a target it is the horse of the companion, and if it has none, the horse of the player
+        string callText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        Actor calledHorse = GetOwnHorse()
+        If callText != ""
+            calledHorse = GetTargetForm(commandHandle) as Actor
+        ElseIf !calledHorse
+            calledHorse = GetPlayersHorse()
+        EndIf
+        resultText = GetCallProblem(calledHorse, callText)
+        If resultText == ""
+            isOk = true
+            resultText = CallHorse(calledHorse)
+        EndIf
+    ElseIf actionName == ACTION_RIDE_LOCK
+        isOk = true
+        If SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "") == RIDE_LOCK_OFF
+            _isRideLocked = false
+            resultText = "From now on you mount when the player mounts, and dismount when the player dismounts."
+        Else
+            _isRideLocked = true
+            resultText = "You keep to yourself now: you stay on your horse, or on foot, whatever the player does, until ride_lock off. mount and dismount still work."
+        EndIf
     ElseIf actionName == ACTION_CAST_SPELL
         ; Casting changes nothing about where the companion walks either
         string spellText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
@@ -1798,6 +1922,12 @@ int Function RunCommand(int commandHandle, string actionName)
         EndIf
     EndIf
 
+    ; follow while the player rides: the companion rides along, unless it keeps to itself
+    If isOk && actionName == ACTION_FOLLOW && !_hasLeader && !_isRideLocked && !IsRideWanted() && Game.GetPlayer().IsOnMount() && GetRideProblem(companion) == ""
+        StartRiding(companion)
+        resultText = resultText + " The player rides, so you mount your horse."
+    EndIf
+
     ; run: the walk that was just started is run, and follow makes the companion run after the player
     If isOk && SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_RUN, 0) != 0
         resultText = resultText + StartRunning(companion, actionName)
@@ -1828,7 +1958,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_SHEATHE || actionName == ACTION_DRAW || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
         Return true
     EndIf
-    If actionName == ACTION_CAST_SPELL
+    If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -3149,6 +3279,433 @@ Function ReleaseSeat()
     EndIf
 EndFunction
 
+; ----------------------------------------------------------------------- ride
+; A character only stays on a horse while a package of the game lets it ride. So a companion that is to ride is put
+; into the alias "Rider" of the horse quest: its package follows the player with "Ride Horse?" switched on, and the
+; game lets the companion get on a horse it owns. Getting off: out of the alias, and Dismount.
+; The companion mounts and dismounts when the player does (the follow watch sees the player change), unless
+; ride_lock is on. mount and dismount of the AI always work
+
+ReferenceAlias Function GetHorseAlias(int aliasId)
+    If !_horseQuest
+        _horseQuest = Game.GetFormFromFile(HorseQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_horseQuest
+        Return None
+    EndIf
+    ; The quest starts with the game. In a save from before it existed it may not be running yet
+    If !_horseQuest.IsRunning()
+        _horseQuest.Start()
+    EndIf
+    Return _horseQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; The horse of the companion, or None if it has none (any more)
+Actor Function GetOwnHorse()
+    ReferenceAlias horseAlias = GetHorseAlias(HorseAliasHorse)
+    If !horseAlias
+        Return None
+    EndIf
+    Actor ownHorse = horseAlias.GetActorReference()
+    If ownHorse && ownHorse.IsDead()
+        Return None
+    EndIf
+    Return ownHorse
+EndFunction
+
+; Whether the companion is to sit on its horse: it is in the alias that lets it ride
+bool Function IsRideWanted()
+    ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
+    Return riderAlias && riderAlias.GetActorReference() != None
+EndFunction
+
+; Whether this command is something the companion can only do on foot
+bool Function IsOnFootAction(string actionName, int commandHandle)
+    If actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_ENTER || actionName == ACTION_LOOT || actionName == ACTION_SIT
+        Return true
+    EndIf
+    If actionName == ACTION_PICK_UP || actionName == ACTION_MAKE_ROOM || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
+        Return true
+    EndIf
+    ; follow with a target: following another character is done on foot
+    Return actionName == ACTION_FOLLOW && SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "") != ""
+EndFunction
+
+; Whether the game calls this animal a horse. The keyword sits on the race of the animal
+bool Function IsHorse(Actor animal)
+    If animal.HasKeywordString(HorseKeyword)
+        Return true
+    EndIf
+    Race animalRace = animal.GetRace()
+    Return animalRace && animalRace.HasKeywordString(HorseKeyword)
+EndFunction
+
+ReferenceAlias Function GetPlayerHorseAlias()
+    If !_playerHorseQuest
+        _playerHorseQuest = Game.GetFormFromFile(PlayerHorseQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_playerHorseQuest
+        Return None
+    EndIf
+    If !_playerHorseQuest.IsRunning()
+        _playerHorseQuest.Start()
+    EndIf
+    Return _playerHorseQuest.GetAlias(PlayerHorseAliasHorse) as ReferenceAlias
+EndFunction
+
+ReferenceAlias Function GetHorseCallAlias(int aliasId)
+    If !_horseCallQuest
+        _horseCallQuest = Game.GetFormFromFile(HorseCallQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_horseCallQuest
+        Return None
+    EndIf
+    If !_horseCallQuest.IsRunning()
+        _horseCallQuest.Start()
+    EndIf
+    Return _horseCallQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; The horse of the player as the game mod knows it, or None if the player has ridden none yet (or it is dead)
+Actor Function GetPlayersHorse()
+    ReferenceAlias horseAlias = GetPlayerHorseAlias()
+    If !horseAlias
+        Return None
+    EndIf
+    Actor playersHorse = horseAlias.GetActorReference()
+    If playersHorse && playersHorse.IsDead()
+        Return None
+    EndIf
+    Return playersHorse
+EndFunction
+
+; Called by the follow watch every second. The game itself remembers which horse the player rode last. That horse
+; is kept in the alias "PlayersHorse", whose package makes it stay where it is left. A ride on the horse of the
+; companion does not count: the player's own horse stays the player's
+Function UpdatePlayersHorse()
+    ReferenceAlias horseAlias = GetPlayerHorseAlias()
+    If !horseAlias
+        Return
+    EndIf
+    Actor lastHorse = Game.GetPlayersLastRiddenHorse()
+    If !lastHorse || lastHorse.IsDead() || lastHorse == GetOwnHorse() || !IsHorse(lastHorse)
+        Return
+    EndIf
+    If horseAlias.GetActorReference() != lastHorse
+        horseAlias.ForceRefTo(lastHorse)
+        lastHorse.EvaluatePackage()
+    EndIf
+EndFunction
+
+; Returns why this horse cannot be called to the player, or "" if it can.
+; horseText is the target the AI named, empty if it named none
+string Function GetCallProblem(Actor horse, string horseText)
+    If !horse
+        If horseText == ""
+            Return "There is no horse to call: you have none (claim_horse makes one yours), and the player has not ridden one yet."
+        EndIf
+        Return "There is no animal with the ref_id '" + horseText + "'. Your horse and the horse of the player are in STATE with their ref_ids."
+    EndIf
+    If horse.IsDead()
+        Return horse.GetDisplayName() + " is dead."
+    EndIf
+    If horse != GetOwnHorse() && horse != GetPlayersHorse()
+        Return horse.GetDisplayName() + " is neither your horse nor the horse of the player, so it does not come when called. claim_horse makes a horse yours."
+    EndIf
+    If horse.IsBeingRidden()
+        Return horse.GetDisplayName() + " is being ridden."
+    EndIf
+    If !GetHorseCallAlias(HorseCallAliasHorse) || !GetHorseCallAlias(HorseCallAliasTarget)
+        Return "The game mod is missing its quest for calling a horse. The mod has to be built and installed again."
+    EndIf
+    Cell playerCell = Game.GetPlayer().GetParentCell()
+    If playerCell && playerCell.IsInterior()
+        Return "The player is indoors. A horse cannot come in there."
+    EndIf
+    Return ""
+EndFunction
+
+; Only call this after GetCallProblem said that it can be done. The horse runs to the player and stays there
+string Function CallHorse(Actor horse)
+    Actor player = Game.GetPlayer()
+    ; A call that is still running is over
+    EndHorseCall()
+    If !horse.Is3DLoaded()
+        ; Too far away to walk: the horse is put to the right of the player, facing the same way
+        float sideAngle = player.GetAngleZ() + 90.0
+        horse.MoveTo(player, HorseCallBesideUnits * Math.sin(sideAngle), HorseCallBesideUnits * Math.cos(sideAngle), 0.0, true)
+        horse.EvaluatePackage()
+        Return horse.GetDisplayName() + " was too far away to run and is brought to the side of the player. It stays there."
+    EndIf
+    If horse.GetDistance(player) <= HorseCallDoneUnits
+        Return horse.GetDisplayName() + " is with the player already."
+    EndIf
+    GetHorseCallAlias(HorseCallAliasTarget).ForceRefTo(player)
+    GetHorseCallAlias(HorseCallAliasHorse).ForceRefTo(horse)
+    horse.EvaluatePackage()
+    SendModEvent(EVENT_HORSE_CALL, "", _horseCallNumber as float)
+    Return horse.GetDisplayName() + " runs to the player and stays there."
+EndFunction
+
+; Takes the called horse out of the alias that makes it run. Its package for staying takes over again
+Function EndHorseCall()
+    _horseCallNumber += 1
+    ReferenceAlias calledAlias = GetHorseCallAlias(HorseCallAliasHorse)
+    If !calledAlias
+        Return
+    EndIf
+    Actor calledHorse = calledAlias.GetActorReference()
+    calledAlias.Clear()
+    If calledHorse
+        calledHorse.EvaluatePackage()
+    EndIf
+EndFunction
+
+; Raised by CallHorse. Watches the called horse until it is with the player, and ends the call
+; when it arrived, when someone got on it, or when it takes too long
+Event OnHorseCallRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownCallNumber = numArg as int
+    int secondsLeft = HorseCallMaxSeconds
+    While ownCallNumber == _horseCallNumber && secondsLeft > 0
+        Utility.Wait(HorseCallWatchSeconds)
+        secondsLeft -= 1
+        If ownCallNumber == _horseCallNumber
+            ReferenceAlias calledAlias = GetHorseCallAlias(HorseCallAliasHorse)
+            Actor calledHorse = None
+            If calledAlias
+                calledHorse = calledAlias.GetActorReference()
+            EndIf
+            If !calledHorse || calledHorse.IsDead() || calledHorse.IsBeingRidden() || !calledHorse.Is3DLoaded() || calledHorse.GetDistance(Game.GetPlayer()) <= HorseCallDoneUnits
+                EndHorseCall()
+                Return
+            EndIf
+        EndIf
+    EndWhile
+    If ownCallNumber == _horseCallNumber
+        string lateName = "The called horse"
+        ReferenceAlias lateAlias = GetHorseCallAlias(HorseCallAliasHorse)
+        If lateAlias && lateAlias.GetActorReference()
+            lateName = lateAlias.GetActorReference().GetDisplayName()
+        EndIf
+        EndHorseCall()
+        AddReport(lateName + " did not reach the player in time and stays where it is now.")
+    EndIf
+EndEvent
+
+; The horse of the player. "player_horse": its form ID, how far it is from the player in meters (-1 = not in the
+; loaded area) and the angle from where the player faces in degrees (negative = left). "player_horse_name": its name.
+; "horse_called": the form ID of the horse that runs to the player at the moment. Each is left out if there is none
+Function AddPlayerHorseToState(int stateHandle, Actor player)
+    ReferenceAlias calledAlias = GetHorseCallAlias(HorseCallAliasHorse)
+    If calledAlias && calledAlias.GetActorReference()
+        SKSE_HTTP.setInt(stateHandle, "horse_called", calledAlias.GetActorReference().GetFormID())
+    EndIf
+    Actor playersHorse = GetPlayersHorse()
+    If !playersHorse
+        Return
+    EndIf
+    int[] horseValues = new int[3]
+    horseValues[0] = playersHorse.GetFormID()
+    horseValues[1] = -1
+    If playersHorse.Is3DLoaded()
+        horseValues[1] = ToMeters(playersHorse.GetDistance(player))
+        horseValues[2] = player.GetHeadingAngle(playersHorse) as int
+    EndIf
+    SKSE_HTTP.setIntArray(stateHandle, "player_horse", horseValues)
+    SetStringSafely(stateHandle, "player_horse_name", playersHorse.GetDisplayName())
+EndFunction
+
+; Returns why the companion cannot take this as its horse, or "" if it can
+string Function GetHorseProblem(Actor horse, string horseText)
+    If !horse
+        Return "There is no animal with the ref_id '" + horseText + "'. Take the ref_id of the horse from 'Nearby' in STATE."
+    EndIf
+    If horse.IsDead()
+        Return horse.GetDisplayName() + " is dead."
+    EndIf
+    If !IsHorse(horse)
+        Return horse.GetDisplayName() + " is not a horse."
+    EndIf
+    If !GetHorseAlias(HorseAliasHorse) || !GetHorseAlias(HorseAliasRider) || !GetHorseAlias(HorseAliasLeader)
+        Return "The game mod is missing its quest for riding. The mod has to be built and installed again."
+    EndIf
+    Return ""
+EndFunction
+
+; Only call this after the command was checked. The horse belongs to the companion from now on:
+; the game lets a character ride a horse it owns
+string Function ClaimHorse(Actor companion, Actor horse)
+    ; A horse is either the companion's or the player's
+    ReferenceAlias playerHorseAlias = GetPlayerHorseAlias()
+    If playerHorseAlias && playerHorseAlias.GetActorReference() == horse
+        playerHorseAlias.Clear()
+    EndIf
+    GetHorseAlias(HorseAliasHorse).ForceRefTo(horse)
+    horse.SetActorOwner(companion.GetActorBase())
+    horse.EvaluatePackage()
+    Return horse.GetDisplayName() + " is your horse now. Get on with mount. When the player mounts or dismounts, you do the same, unless you switch that off with ride_lock."
+EndFunction
+
+; Returns why the companion cannot mount its horse now, or "" if it can
+string Function GetRideProblem(Actor companion)
+    If !GetHorseAlias(HorseAliasHorse) || !GetHorseAlias(HorseAliasRider) || !GetHorseAlias(HorseAliasLeader)
+        Return "The game mod is missing its quest for riding. The mod has to be built and installed again."
+    EndIf
+    If !GetOwnHorse()
+        Return "You have no horse. Take one as yours first: claim_horse with the ref_id of a horse from 'Nearby' in STATE (ask the player which one)."
+    EndIf
+    If companion.IsOnMount() && IsRideWanted()
+        Return "You sit on your horse already."
+    EndIf
+    Cell ownCell = companion.GetParentCell()
+    If !companion.Is3DLoaded() || (ownCell && ownCell.IsInterior())
+        Return "You cannot ride here: indoors, or too far away from the player."
+    EndIf
+    If companion.IsInCombat()
+        Return "You are in a fight. Mount when it is over."
+    EndIf
+    Return ""
+EndFunction
+
+; Only call this after GetRideProblem said that it can be done
+string Function StartRiding(Actor companion)
+    Actor ownHorse = GetOwnHorse()
+    ; As for every command that sends the companion somewhere: what it was doing ends, and it follows the player
+    TakeFollowAgain()
+    EndWalk()
+    StopFleeing()
+    StopFollowingLeader()
+    StandUp()
+    StopGesture(companion)
+    SetWaiting(companion, false)
+    ; A horse that was called to the player stops running there
+    ReferenceAlias calledAlias = GetHorseCallAlias(HorseCallAliasHorse)
+    If calledAlias && calledAlias.GetActorReference() == ownHorse
+        EndHorseCall()
+    EndIf
+    If !ownHorse.Is3DLoaded() || ownHorse.GetDistance(companion) > HorseSummonUnits
+        ; The horse is put to the right of the companion, facing the same way
+        float sideAngle = companion.GetAngleZ() + 90.0
+        ownHorse.MoveTo(companion, HorseBesideUnits * Math.sin(sideAngle), HorseBesideUnits * Math.cos(sideAngle), 0.0, true)
+    EndIf
+    GetHorseAlias(HorseAliasLeader).ForceRefTo(Game.GetPlayer())
+    GetHorseAlias(HorseAliasRider).ForceRefTo(companion)
+    ownHorse.EvaluatePackage()
+    companion.EvaluatePackage()
+    SendModEvent(EVENT_MOUNT_HELP, "", 0.0)
+    Return "You get on " + ownHorse.GetDisplayName() + " and ride after the player. Your next STATE tells you whether you sit on it."
+EndFunction
+
+; Raised by StartRiding. The riding package lets the companion mount on its own. If it has not after a moment,
+; it is told to use the horse, which is what the player does to get on
+Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form sender)
+    Utility.Wait(MountHelpSeconds)
+    Actor companion = GetCompanion()
+    Actor ownHorse = GetOwnHorse()
+    If !companion || !ownHorse || !IsRideWanted() || companion.IsOnMount()
+        Return
+    EndIf
+    ownHorse.Activate(companion)
+    Utility.Wait(MountHelpSeconds + MountHelpSeconds)
+    If IsRideWanted() && !companion.IsOnMount()
+        AddReport("You did not get on your horse. Go closer to it, or try mount again.")
+    EndIf
+EndEvent
+
+; Takes the companion off its horse: out of the alias that lets it ride, and down
+Function StopRiding(Actor companion)
+    ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
+    If riderAlias
+        Actor rider = riderAlias.GetActorReference()
+        riderAlias.Clear()
+        If rider && rider != companion
+            ; Another follower sat in the alias (the player changed followers)
+            If rider.IsOnMount()
+                rider.Dismount()
+            EndIf
+            rider.EvaluatePackage()
+        EndIf
+    EndIf
+    If companion.IsOnMount()
+        companion.Dismount()
+    EndIf
+    companion.EvaluatePackage()
+EndFunction
+
+; Called by the follow watch every second. When the player has just mounted or dismounted, the companion does the
+; same, unless it keeps to itself (ride_lock), waits somewhere or has no horse
+Function CheckRideWithPlayer()
+    Actor companion = GetCompanion()
+    bool isPlayerRiding = Game.GetPlayer().IsOnMount()
+    bool hasChanged = isPlayerRiding != _wasPlayerRiding
+    _wasPlayerRiding = isPlayerRiding
+    If !companion || companion.IsDead()
+        Return
+    EndIf
+    ; Whoever sits in the alias but is no longer the follower of the player has to get off
+    ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
+    If riderAlias
+        Actor rider = riderAlias.GetActorReference()
+        If rider && rider != companion
+            StopRiding(companion)
+        EndIf
+    EndIf
+    If !hasChanged || _isRideLocked
+        Return
+    EndIf
+    If isPlayerRiding
+        If !IsRideWanted() && !IsWaiting(companion) && !_hasLeader && !_walkTarget && !_seat && GetRideProblem(companion) == ""
+            StartRiding(companion)
+        EndIf
+    ElseIf IsRideWanted() || companion.IsOnMount()
+        StopRiding(companion)
+    EndIf
+EndFunction
+
+; On what a character sits: "<prefix>_mount" is the name of the horse it rides (UnknownMountName if the game mod
+; cannot tell which horse), "<prefix>_seat" the name of the furniture it sits on (left out if that has no name)
+Function AddSeatToState(int stateHandle, Actor sitter, string prefix)
+    If sitter.IsOnMount()
+        string mountName = UnknownMountName
+        If _nativeVersion >= NativeVersionWithMount
+            Actor mount = KI_MCP_Gefaehrte_Native.GetMount(sitter)
+            If mount && mount.GetDisplayName() != ""
+                mountName = mount.GetDisplayName()
+            EndIf
+        EndIf
+        SetStringSafely(stateHandle, prefix + "_mount", mountName)
+        Return
+    EndIf
+    If sitter.GetSitState() < SitStateSeated
+        Return
+    EndIf
+    ObjectReference seat = sitter.GetFurnitureReference()
+    If seat && seat.GetDisplayName() != ""
+        SetStringSafely(stateHandle, prefix + "_seat", seat.GetDisplayName())
+    EndIf
+EndFunction
+
+; The horse of the companion. "horse": its form ID, how far it is from the companion in meters (-1 = not in the
+; loaded area), the angle from where the companion faces in degrees (negative = left), 1 if the companion is to ride
+; it, 1 if the companion keeps to itself (ride_lock). "horse_name": its name. Left out without a horse
+Function AddHorseToState(int stateHandle, Actor companion)
+    Actor ownHorse = GetOwnHorse()
+    If !ownHorse
+        Return
+    EndIf
+    int[] horseValues = new int[5]
+    horseValues[0] = ownHorse.GetFormID()
+    horseValues[1] = -1
+    If ownHorse.Is3DLoaded() && companion.Is3DLoaded()
+        horseValues[1] = ToMeters(ownHorse.GetDistance(companion))
+        horseValues[2] = companion.GetHeadingAngle(ownHorse) as int
+    EndIf
+    horseValues[3] = ToNumber(IsRideWanted())
+    horseValues[4] = ToNumber(_isRideLocked)
+    SKSE_HTTP.setIntArray(stateHandle, "horse", horseValues)
+    SetStringSafely(stateHandle, "horse_name", ownHorse.GetDisplayName())
+EndFunction
+
 ; ------------------------------------------------------------------------ run
 ; A character only runs if a package of the game tells it to: Actor.PathToReference, which does the walks of this mod,
 ; only ever walks. To run to a place the companion is put into the alias "Runner" of the run quest, and what it is to
@@ -3246,6 +3803,10 @@ string Function StartRunning(Actor companion, string actionName)
             ; Whoever follows a character other than the player runs whenever that is needed already
             Return ""
         EndIf
+        If IsRideWanted() || companion.IsOnMount()
+            ; On horseback the riding package sets the pace
+            Return ""
+        EndIf
         StartRunningAfter(companion, Game.GetPlayer(), RunModeFollow)
         Return " You run to keep up, until your next command."
     EndIf
@@ -3315,6 +3876,8 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             ; Whoever follows the player at the moment is the one whose own sentences are cut off. Looking every
             ; second makes a change of follower count at once, also while the AI asks for no state
             UpdateMutedSpeaker(GetCompanion())
+            UpdatePlayersHorse()
+            CheckRideWithPlayer()
             CheckCatchUp()
         EndIf
     EndWhile
@@ -3349,6 +3912,10 @@ Function CheckCatchUp()
         Return
     EndIf
     If _runMode != RunModeNone || _hasLeader || _walkTarget || _seat || _fleeingActor == companion
+        Return
+    EndIf
+    ; A rider is brought along by its riding package. The package for catching up would pull it off the horse
+    If IsRideWanted() || companion.IsOnMount()
         Return
     EndIf
     If companion.IsDead() || !companion.Is3DLoaded() || IsWaiting(companion) || companion.IsInCombat() || companion.GetSitState() != 0

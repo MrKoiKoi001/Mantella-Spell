@@ -145,3 +145,8 @@ int[] Function GetSurroundingsToward(Actor origin, int rangeMeters, int headingD
 ; How high the ground is at the spot x, y (game units) close to the character "origin", found by a ray downwards:
 ; the height to put something at that a character is to walk to. -1000000 if the ray finds no ground there
 float Function GetGroundHeight(Actor origin, float x, float y) global native
+
+; The function below exists from interface version 14 on
+
+; The horse (or other mount) a character sits on, or None if it rides nothing
+Actor Function GetMount(Actor rider) global native

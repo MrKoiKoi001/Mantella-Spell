@@ -1,0 +1,15 @@
+FormKey: 00080F:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_PlayerHorseQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 110
+NextAliasID: 1
+Aliases:
+- Name: PlayersHorse
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000810:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
