@@ -338,6 +338,12 @@ string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
 string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
 string Property ACTION_LOOT = "loot" AutoReadOnly
+; cast_spell: the companion casts a spell it knows, at once, without the movement of the hands and without paying magicka.
+; Which spell: its ID in the two halves of the item, or else its name in the detail. On whom: the target, or nobody
+string Property ACTION_CAST_SPELL = "cast_spell" AutoReadOnly
+; How many spells of the companion go to the server at most, and how many numbers each of them has there
+int Property MaxSpells = 40 AutoReadOnly
+int Property ValuesPerSpell = 2 AutoReadOnly
 string Property ACTION_SIT = "sit" AutoReadOnly
 string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
 string Property ACTION_GESTURE = "gesture" AutoReadOnly
@@ -874,6 +880,7 @@ int Function BuildState()
     EndIf
     If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
         AddInventoryToState(stateHandle, companion, "inventory_own")
+        AddSpellsToState(stateHandle, companion)
     EndIf
     If wantedInventory == INVENTORY_CORPSE
         AddCorpseToState(stateHandle, _wantedCorpse)
@@ -1077,6 +1084,96 @@ EndFunction
 ; Numbers: first how many kinds of items there are in all (more than MaxInventoryItems are cut off), then per item
 ; form ID, how many, form type, worn or held (1 or 0). An item without a name (the game hides those) stays all 0.
 ; Names: one text per item, its place in the list of numbers (from 0), a colon and the name
+; ---------------------------------------------------------------------- spells
+; The spells of the companion are those it learned while playing (they belong to the character in the world) and those
+; it has from the start (they belong to what the game made the character from). Only what costs magicka counts:
+; that leaves out the abilities and powers the game also keeps as spells
+
+bool Function IsCastableSpell(Spell candidate)
+    Return candidate && candidate.GetName() != "" && candidate.GetMagickaCost() > 0
+EndFunction
+
+; The spell at this place among all spells of the companion (learned ones first), or None
+Spell Function GetSpellAt(Actor companion, int place)
+    int learnedCount = companion.GetSpellCount()
+    If place < learnedCount
+        Return companion.GetNthSpell(place)
+    EndIf
+    ActorBase companionBase = companion.GetActorBase()
+    If companionBase && place - learnedCount < companionBase.GetSpellCount()
+        Return companionBase.GetNthSpell(place - learnedCount)
+    EndIf
+    Return None
+EndFunction
+
+int Function GetSpellPlaces(Actor companion)
+    int places = companion.GetSpellCount()
+    ActorBase companionBase = companion.GetActorBase()
+    If companionBase
+        places += companionBase.GetSpellCount()
+    EndIf
+    Return places
+EndFunction
+
+; The spell the companion knows that is wantedForm, or, if that is None, the one with exactly this name
+; (capitals do not matter). None if it knows no such spell
+Spell Function FindKnownSpell(Actor companion, Form wantedForm, string wantedName)
+    int places = GetSpellPlaces(companion)
+    int place = 0
+    While place < places
+        Spell candidate = GetSpellAt(companion, place)
+        If IsCastableSpell(candidate)
+            If wantedForm
+                If candidate == wantedForm
+                    Return candidate
+                EndIf
+            ElseIf wantedName != "" && candidate.GetName() == wantedName
+                Return candidate
+            EndIf
+        EndIf
+        place += 1
+    EndWhile
+    Return None
+EndFunction
+
+; Goes along with the own inventory. "spells": how many spells there are, then ValuesPerSpell numbers per spell:
+; its form ID and what it costs in magicka. "spells_names": the names, built like the names of the inventory
+Function AddSpellsToState(int stateHandle, Actor companion)
+    int places = GetSpellPlaces(companion)
+    int[] foundIds = Utility.CreateIntArray(MaxSpells)
+    int[] foundCosts = Utility.CreateIntArray(MaxSpells)
+    string[] foundNames = Utility.CreateStringArray(MaxSpells)
+    int foundCount = 0
+    int place = 0
+    While place < places && foundCount < MaxSpells
+        Spell candidate = GetSpellAt(companion, place)
+        ; A spell that is in both lists is only listed once
+        If IsCastableSpell(candidate) && foundIds.Find(candidate.GetFormID()) < 0
+            foundIds[foundCount] = candidate.GetFormID()
+            foundCosts[foundCount] = candidate.GetMagickaCost()
+            foundNames[foundCount] = candidate.GetName()
+            foundCount += 1
+        EndIf
+        place += 1
+    EndWhile
+    int[] spellValues = Utility.CreateIntArray(1 + foundCount * ValuesPerSpell)
+    spellValues[0] = foundCount
+    SKSE_HTTP.setIntArray(stateHandle, "spells", spellValues)
+    If foundCount == 0
+        Return
+    EndIf
+    string[] spellNames = Utility.CreateStringArray(foundCount)
+    int index = 0
+    While index < foundCount
+        spellValues[1 + index * ValuesPerSpell] = foundIds[index]
+        spellValues[2 + index * ValuesPerSpell] = foundCosts[index]
+        spellNames[index] = (index as string) + ":" + foundNames[index]
+        index += 1
+    EndWhile
+    SKSE_HTTP.setIntArray(stateHandle, "spells", spellValues)
+    SKSE_HTTP.setStringArray(stateHandle, "spells_names", spellNames)
+EndFunction
+
 Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyName)
     ; Only a character can wear or hold something
     Actor ownerActor = owner as Actor
@@ -1388,11 +1485,32 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
+    ElseIf actionName == ACTION_CAST_SPELL
+        ; Casting changes nothing about where the companion walks either
+        string spellText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        Spell wantedSpell = FindKnownSpell(companion, GetFormFromHalves(SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)), spellText)
+        string spellTargetText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        ObjectReference spellTarget = GetTargetForm(commandHandle) as ObjectReference
+        If !wantedSpell
+            resultText = "You do not know a spell '" + spellText + "'. STATE with inventory 'own' lists the spells you know. You learn one by reading its spell tome: equip on a tome in your inventory."
+        ElseIf spellTargetText != "" && !spellTarget
+            resultText = "There is nobody with the ref_id '" + spellTargetText + "' to cast it on. Take the ref_id from STATE, or leave the target out."
+        ElseIf spellTarget && !spellTarget.Is3DLoaded()
+            resultText = spellTarget.GetDisplayName() + " is too far away to cast a spell on."
+        Else
+            isOk = true
+            wantedSpell.Cast(companion, spellTarget)
+            If spellTarget
+                resultText = "You cast " + wantedSpell.GetName() + " on " + spellTarget.GetDisplayName() + "."
+            Else
+                resultText = "You cast " + wantedSpell.GetName() + "."
+            EndIf
+        EndIf
     ElseIf IsItemAction(actionName)
         ; What the companion does with its things changes nothing about where it walks or whom it fights
         Form item = GetTargetForm(commandHandle)
@@ -1710,6 +1828,9 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_SHEATHE || actionName == ACTION_DRAW || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
         Return true
     EndIf
+    If actionName == ACTION_CAST_SPELL
+        Return true
+    EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
 EndFunction
 
@@ -1853,6 +1974,19 @@ EndFunction
 ; wantedCount is for give and take: how many, 0 = all
 string Function DoItemCommand(Actor companion, string actionName, Form item, int wantedCount)
     string itemName = item.GetName()
+    If actionName == ACTION_EQUIP && item.GetType() == FormTypeBook
+        ; A spell tome: the companion reads it and knows the spell from then on, as the player would. The tome is used up.
+        ; The game does not do this for characters on its own: a tome given to a follower just lies in its inventory
+        Spell taughtSpell = (item as Book).GetSpell()
+        If taughtSpell
+            If companion.HasSpell(taughtSpell)
+                Return "You know the spell " + taughtSpell.GetName() + " already, so you keep " + itemName + "."
+            EndIf
+            companion.AddSpell(taughtSpell, false)
+            companion.RemoveItem(item, 1, true)
+            Return "You read " + itemName + " and know the spell " + taughtSpell.GetName() + " now. The tome is used up. Cast the spell with cast_spell."
+        EndIf
+    EndIf
     If actionName == ACTION_EQUIP
         ; The last "true" keeps the game from showing a message. Equipping a potion or food means using it up
         companion.EquipItem(item, false, true)
