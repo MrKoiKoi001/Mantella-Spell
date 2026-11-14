@@ -190,6 +190,14 @@ int Property FormTypeDoor = 29 AutoReadOnly
 int Property LeadQuestFormId = 0x00000808 AutoReadOnly
 int Property LeadAliasWalker = 0 AutoReadOnly
 int Property LeadAliasLeader = 1 AutoReadOnly
+; The quest of this mod for running to something that is no character (a door, a chest, a marker): whoever is in its
+; alias "Runner" gets a travel package of the game with "Run" as its speed, to whatever is in its alias "Target".
+; The package that follows (lead quest) only follows characters
+int Property RunQuestFormId = 0x0000080A AutoReadOnly
+int Property RunAliasRunner = 0 AutoReadOnly
+int Property RunAliasTarget = 1 AutoReadOnly
+; say to another character: how often the script looks whether the companion still faces whom it speaks to
+float Property SayFaceCheckSeconds = 0.3 AutoReadOnly
 ; expression: the looks of the game go from 0 to this number (see Actor.SetExpressionOverride)
 int Property HighestMood = 16 AutoReadOnly
 ; visible: what the companion can see lies within this many degrees to the left and right of where it faces.
@@ -357,6 +365,8 @@ bool _isGesturing = false
 ; follow with a target: the quest that makes the companion follow someone else (looked up once), whom it follows
 ; (None = the player or nobody), and whether it is in the alias of that quest
 Quest _leadQuest
+; The run quest of this mod, looked up once
+Quest _runQuest
 Actor _leader
 bool _hasLeader = false
 ; enter: the walk that is running leads to a door the companion is to go through, and the door it went through last
@@ -2113,13 +2123,27 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     If angle > SayTurnDegrees || angle < -SayTurnDegrees
         companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
     EndIf
-    companion.SetLookAt(target)
+    companion.SetLookAt(target, true)
     _sayLookTarget = target
     companion.Say(_sayApproachTopic)
     StartSayFace(companion, _sayApproachMood)
     PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
-    ; The server's say_end came too early for this sentence, so the end is waited for here
-    Utility.Wait((_sayApproachMs as float) / 1000.0 + SayEndExtraSeconds)
+    ; The server's say_end came too early for this sentence, so the end is waited for here.
+    ; The game turns a character that speaks towards the player (Say of Skyrim knows nobody else to speak to).
+    ; So for the whole sentence the script keeps looking and turns the companion back to whom it speaks to
+    float sentenceSeconds = (_sayApproachMs as float) / 1000.0 + SayEndExtraSeconds
+    float spokenSeconds = 0.0
+    While spokenSeconds < sentenceSeconds && ownNumber == _sayNumber
+        Utility.Wait(SayFaceCheckSeconds)
+        spokenSeconds += SayFaceCheckSeconds
+        If ownNumber == _sayNumber && !_walkTarget && !companion.IsInCombat() && companion.GetSitState() == 0
+            angle = companion.GetHeadingAngle(target)
+            If angle > SayTurnDegrees || angle < -SayTurnDegrees
+                companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+                companion.SetLookAt(target, true)
+            EndIf
+        EndIf
+    EndWhile
     If ownNumber != _sayNumber
         Return
     EndIf
@@ -2935,6 +2959,34 @@ EndFunction
 ; only ever walks. The package of the lead quest (follow with a target) has "Run" as its speed. So for running the
 ; companion is put into the alias "Walker" of that quest, and whom or what it is to run to into the alias "Leader"
 
+; One of the two aliases of the run quest (RunAliasRunner or RunAliasTarget), or None if the quest is missing
+ReferenceAlias Function GetRunAlias(int aliasId)
+    If !_runQuest
+        _runQuest = Game.GetFormFromFile(RunQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_runQuest
+        Return None
+    EndIf
+    ; The quest starts with the game. In a save from before it existed it may not be running yet
+    If !_runQuest.IsRunning()
+        _runQuest.Start()
+    EndIf
+    Return _runQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; The first stretch of a walk: the companion runs to runTarget, whatever that is, with the travel package of the run quest
+Function StartRunningTo(Actor companion, ObjectReference runTarget)
+    ReferenceAlias runnerAlias = GetRunAlias(RunAliasRunner)
+    ReferenceAlias targetAlias = GetRunAlias(RunAliasTarget)
+    If !runnerAlias || !targetAlias
+        Return
+    EndIf
+    targetAlias.ForceRefTo(runTarget)
+    runnerAlias.ForceRefTo(companion)
+    companion.EvaluatePackage()
+    _runMode = RunModeWalk
+EndFunction
+
 ; Only call this if the companion follows nobody because of follow with a target (_hasLeader)
 Function StartRunningAfter(Actor companion, ObjectReference runTarget, int runMode)
     ReferenceAlias walkerAlias = GetLeadAlias(LeadAliasWalker)
@@ -2951,6 +3003,21 @@ EndFunction
 ; Takes the companion out of the lead quest again, if it is only in there for running
 Function StopRunning()
     If _runMode == RunModeNone
+        Return
+    EndIf
+    If _runMode == RunModeWalk
+        ; The first stretch of a walk runs with the run quest
+        _runMode = RunModeNone
+        ReferenceAlias runnerAlias = GetRunAlias(RunAliasRunner)
+        ReferenceAlias targetAlias = GetRunAlias(RunAliasTarget)
+        If runnerAlias && targetAlias
+            Actor runner = runnerAlias.GetActorReference()
+            runnerAlias.Clear()
+            targetAlias.Clear()
+            If runner
+                runner.EvaluatePackage()
+            EndIf
+        EndIf
         Return
     EndIf
     _runMode = RunModeNone
@@ -2973,8 +3040,8 @@ EndFunction
 
 ; run in a command that just did what it says. Returns what to add to the result for the AI
 string Function StartRunning(Actor companion, string actionName)
-    If !GetLeadAlias(LeadAliasWalker) || !GetLeadAlias(LeadAliasLeader)
-        Return " But the game mod is missing its quest for running, so you walk."
+    If !GetLeadAlias(LeadAliasWalker) || !GetLeadAlias(LeadAliasLeader) || !GetRunAlias(RunAliasRunner) || !GetRunAlias(RunAliasTarget)
+        Return " But the game mod is missing its quests for running, so you walk."
     EndIf
     If actionName == ACTION_FOLLOW
         If _hasLeader
@@ -3002,12 +3069,11 @@ Function RunNear(Actor companion, ObjectReference walkTarget, ObjectReference sh
     If startDistance <= RunNearUnits
         Return
     EndIf
-    ; A character is sure to be something the package can follow, so the companion runs after it rather than its marker
-    ObjectReference runTarget = walkTarget
-    If shownTarget as Actor
-        runTarget = shownTarget
+    StartRunningTo(companion, walkTarget)
+    If _runMode != RunModeWalk
+        AddReport("You could not run there, so you walk: the game mod is missing its quest for running. It has to be built and installed again.")
+        Return
     EndIf
-    StartRunningAfter(companion, runTarget, RunModeWalk)
     If _runMode != RunModeWalk
         Return
     EndIf
@@ -3030,7 +3096,7 @@ Function RunNear(Actor companion, ObjectReference walkTarget, ObjectReference sh
                 ; The walk watch may start this walk again. Then it is walked from the beginning
                 _isRunWanted = false
                 If startDistance - nowDistance < RunProgressUnits
-                    AddReport("You could not run there, so you walk.")
+                    AddReport("You could not run there, so you walk: you did not get going within a few seconds (something in the way, or no path the game finds).")
                 EndIf
             EndIf
         Else

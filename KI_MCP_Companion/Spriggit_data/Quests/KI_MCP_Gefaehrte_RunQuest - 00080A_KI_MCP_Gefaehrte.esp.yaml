@@ -1,0 +1,21 @@
+FormKey: 00080A:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_RunQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 100
+NextAliasID: 2
+Aliases:
+- Name: Runner
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 00080B:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: Target
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null
