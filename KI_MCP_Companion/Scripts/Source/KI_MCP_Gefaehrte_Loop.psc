@@ -639,13 +639,7 @@ int Function BuildState()
     EndIf
     ; The plugin is told with every state whose own sentences of the game it has to cut off: the companion of the
     ; moment, or nobody. So a new follower is muted in place of the one before, and switching it off counts at once
-    If _nativeVersion >= NativeVersionWithMute
-        If _isMuteWanted
-            KI_MCP_Gefaehrte_Native.SetMutedSpeaker(companion)
-        Else
-            KI_MCP_Gefaehrte_Native.SetMutedSpeaker(None)
-        EndIf
-    EndIf
+    UpdateMutedSpeaker(companion)
     ; A companion that was sent away while it sat would keep sitting for good
     If _seat && !companion
         ReleaseSeat()
@@ -3114,10 +3108,27 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
     While ownWatchNumber == _followWatchNumber
         Utility.Wait(FollowWatchSeconds)
         If ownWatchNumber == _followWatchNumber
+            ; Whoever follows the player at the moment is the one whose own sentences are cut off. Looking every
+            ; second makes a change of follower count at once, also while the AI asks for no state
+            UpdateMutedSpeaker(GetCompanion())
             CheckCatchUp()
         EndIf
     EndWhile
 EndEvent
+
+; Tells the SKSE plugin whose own sentences of the game it is to cut off: the follower of the moment if the server
+; wants that (setting mute_game_lines), otherwise nobody. Without a follower nobody is muted,
+; and a follower that was sent away speaks as always again
+Function UpdateMutedSpeaker(Actor companion)
+    If _nativeVersion < NativeVersionWithMute
+        Return
+    EndIf
+    If _isMuteWanted
+        KI_MCP_Gefaehrte_Native.SetMutedSpeaker(companion)
+    Else
+        KI_MCP_Gefaehrte_Native.SetMutedSpeaker(None)
+    EndIf
+EndFunction
 
 ; follow: a companion that follows the player and has fallen behind by more than CatchUpStartUnits runs
 ; until it has caught up, without anybody telling it to
