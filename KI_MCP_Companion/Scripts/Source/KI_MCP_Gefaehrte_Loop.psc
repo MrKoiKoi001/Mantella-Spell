@@ -82,6 +82,9 @@ string Property GoldFile = "Skyrim.esm" AutoReadOnly
 int Property MaxInventoryItems = 120 AutoReadOnly
 ; Numbers per item in the inventory lists: form ID, how many, form type, worn or held (see AddInventoryToState)
 int Property ValuesPerItem = 4 AutoReadOnly
+; The fourth number of an item: 1 = the owner wears or holds it, plus ItemFlagFavorite if the player has it among
+; the favorites (only asked for the inventory of the player: the game has favorites for nobody else)
+int Property ItemFlagFavorite = 2 AutoReadOnly
 ; Form types as SKSE numbers them (Form.GetType). Only these kinds can be worn or held
 int Property FormTypeArmor = 26 AutoReadOnly
 int Property FormTypeLight = 31 AutoReadOnly
@@ -346,6 +349,51 @@ string Property ACTION_MOUNT = "mount" AutoReadOnly
 string Property ACTION_DISMOUNT = "dismount" AutoReadOnly
 string Property ACTION_RIDE_LOCK = "ride_lock" AutoReadOnly
 string Property RIDE_LOCK_OFF = "off" AutoReadOnly
+; rename_horse: the horse that is the target (without one the companion's own) gets the name in the detail.
+; The game mod remembers up to NamedHorseCount horses it renamed and gives them their name back if the game lost it
+string Property ACTION_RENAME_HORSE = "rename_horse" AutoReadOnly
+int Property NamedHorseCount = 10 AutoReadOnly
+; call_horse: whom the horse runs to, if the detail names someone. Without it every horse runs to its owner
+string Property CALL_TO_PLAYER = "player" AutoReadOnly
+string Property CALL_TO_COMPANION = "you" AutoReadOnly
+; Riding somewhere: the riding package follows whatever is in the alias "Leader", so the companion rides to a target
+; and stays near it by having the target put there. Without run it is also put into the alias "WalkRider" of a second
+; quest, whose package is the same without a fixed speed and has the higher priority
+int Property RideWalkQuestFormId = 0x00000813 AutoReadOnly
+int Property RideWalkAliasRider = 0 AutoReadOnly
+int Property RideWalkAliasLeader = 1 AutoReadOnly
+; A rider counts as arrived once it is this close to where it rides to (the riding package stops a bit before that)
+float Property RideArrivedUnits = 900.0 AutoReadOnly
+; With every request to the server: whether the companion is in the middle of something that takes time, and how
+; many things it started have failed. The server needs both for commands that wait for each other
+string Property KEY_BUSY = "companion_busy" AutoReadOnly
+string Property KEY_FAILS = "companion_fails" AutoReadOnly
+; gesture: the event that ends the animation, the animation for sitting (ID in two halves, its event, the event that
+; ends it) and 1 if the gesture is a state that stays on until it is ended. KEY_COMMAND_TALK carries the event of the
+; animation for standing: it is sent if the game refuses to play the animation by its ID
+string Property KEY_COMMAND_STOP_EVENT = "companion_stop_event" AutoReadOnly
+string Property KEY_COMMAND_SIT_ITEM_HIGH = "companion_sit_item_high" AutoReadOnly
+string Property KEY_COMMAND_SIT_ITEM_LOW = "companion_sit_item_low" AutoReadOnly
+string Property KEY_COMMAND_SIT_EVENT = "companion_sit_event" AutoReadOnly
+string Property KEY_COMMAND_SIT_STOP_EVENT = "companion_sit_stop_event" AutoReadOnly
+string Property KEY_COMMAND_GESTURE_STATE = "companion_gesture_state" AutoReadOnly
+; How an animation got played: by its ID, or by its event because the game refused the ID
+string Property GestureWayIdle = "idle" AutoReadOnly
+string Property GestureWayEvent = "event" AutoReadOnly
+; equip on a drink or on food plays an animation with it. Drinks and potions are told by the sound of using them
+; (ITMPotionUse of Skyrim.esm). The animations for standing and for sitting on a chair, with their events
+int Property DrinkSoundFormId = 0x000B6435 AutoReadOnly
+int Property IdleDrinkFormId = 0x000FD68B AutoReadOnly
+string Property IdleDrinkEvent = "IdleDrink" AutoReadOnly
+int Property IdleDrinkPotionFormId = 0x000D33B0 AutoReadOnly
+string Property IdleDrinkPotionEvent = "IdleDrinkPotion" AutoReadOnly
+int Property ChairDrinkFormId = 0x00065D07 AutoReadOnly
+string Property ChairDrinkEvent = "ChairDrinkingStart" AutoReadOnly
+int Property IdleEatFormId = 0x00064100 AutoReadOnly
+string Property IdleEatEvent = "idleEatingStandingStart" AutoReadOnly
+int Property ChairEatFormId = 0x00065D06 AutoReadOnly
+string Property ChairEatEvent = "ChairEatingStart" AutoReadOnly
+string Property ChairEatStopEvent = "ChairEatingStop" AutoReadOnly
 ; call_horse: the horse of the companion or the horse of the player runs to the player and stays there
 string Property ACTION_CALL_HORSE = "call_horse" AutoReadOnly
 ; The quest that knows the horse of the player: the alias "PlayersHorse" holds the horse the player rode last
@@ -434,6 +482,29 @@ Quest _runQuest
 Quest _horseQuest
 Quest _playerHorseQuest
 Quest _horseCallQuest
+Quest _rideWalkQuest
+; Whom the called horse runs to
+Actor _horseCallTarget
+; Riding somewhere: what the companion rides to (None = it rides after someone or waits), whom it rides after
+; instead of the player, whether it stays where it is in the saddle, and the marker for a spot to ride to or to wait at
+ObjectReference _rideTarget
+Actor _rideLeader
+bool _isRideHolding = false
+ObjectReference _rideMarker
+bool _isRideMoveOk = false
+; Whether the companion is getting on its horse at the moment
+bool _isMounting = false
+; How many things the companion started have failed (see AddFailReport)
+int _failNumber = 0
+; The horses the game mod renamed and their names, and the place the next one takes if all are taken
+Form[] _namedHorses
+string[] _horseNames
+int _nextNamedHorsePlace = 0
+; A gesture that is a state (being drunk): the event that ends it, empty if none is on.
+; A gesture that plays now: the event that ends it, and whether it is one for sitting
+string _stateStopEvent = ""
+string _gestureStopEvent = ""
+bool _isSitGesture = false
 ; Every call of a horse gets a new number, so that the watch of an earlier call notices that it is over
 int _horseCallNumber = 0
 ; Whether the companion keeps to itself when the player mounts or dismounts (ride_lock)
@@ -560,6 +631,7 @@ EndEvent
 ; Called by KI_MCP_Gefaehrte_PlayerAlias. Registrations for mod events do not survive loading a save
 Function OnGameLoaded()
     StartLoop()
+    KeepHorseNames()
 EndFunction
 
 Function StartLoop()
@@ -578,6 +650,9 @@ Function StartLoop()
     StopFleeing()
     EndWalk()
     _isGesturing = false
+    _isSitGesture = false
+    _gestureStopEvent = ""
+    _isMounting = false
     ; A sentence that was being spoken when the game was saved is over: its say_end will not come any more
     Actor speaker = GetCompanion()
     If speaker
@@ -662,6 +737,8 @@ Function SendPoll(int[] resultHandles, bool isStateWanted)
 
     int requestHandle = SKSE_HTTP.createDictionary()
     SKSE_HTTP.setInt(requestHandle, KEY_POLL_ID, ownPollId)
+    SKSE_HTTP.setInt(requestHandle, KEY_BUSY, ToNumber(IsBusy()))
+    SKSE_HTTP.setInt(requestHandle, KEY_FAILS, _failNumber)
     If isStateWanted
         SKSE_HTTP.setNestedDictionary(requestHandle, KEY_STATE, BuildState())
     EndIf
@@ -1003,7 +1080,7 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
     companionValues[3] = ToNumber(companion.IsInCombat())
-    companionValues[4] = ToNumber(IsWaiting(companion))
+    companionValues[4] = ToNumber(IsWaiting(companion) || (_isRideHolding && !_rideTarget && IsRideWanted()))
     ; Far away (eg left behind in another place) the game has no position worth measuring
     If companion.Is3DLoaded()
         companionValues[5] = 1
@@ -1021,6 +1098,9 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[11] = _walkShownTarget.GetFormID()
     ElseIf _walkTarget && !_isRoomWalk
         companionValues[11] = _walkTarget.GetFormID()
+    ElseIf _rideTarget && _rideTarget != _rideMarker && IsRideWanted()
+        ; What the companion rides to
+        companionValues[11] = _rideTarget.GetFormID()
     EndIf
     companionValues[12] = companion.GetSitState()
     companionValues[13] = ToNumber(companion.IsWeaponDrawn())
@@ -1029,6 +1109,8 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     EndIf
     If _hasLeader && _leader
         companionValues[15] = _leader.GetFormID()
+    ElseIf _rideLeader && IsRideWanted()
+        companionValues[15] = _rideLeader.GetFormID()
     EndIf
     companionValues[16] = ToNumber(_keepsWeaponAway)
     companionValues[17] = ToNumber(companion.IsRunning() || companion.IsSprinting())
@@ -1239,6 +1321,7 @@ EndFunction
 Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyName)
     ; Only a character can wear or hold something
     Actor ownerActor = owner as Actor
+    bool isPlayerInventory = owner == Game.GetPlayer()
     int totalCount = owner.GetNumItems()
     int itemCount = totalCount
     If itemCount > MaxInventoryItems
@@ -1265,6 +1348,9 @@ Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyN
                 itemValues[start + 2] = itemType
                 If ownerActor && (itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight)
                     itemValues[start + 3] = ToNumber(ownerActor.IsEquipped(item))
+                EndIf
+                If isPlayerInventory && Game.IsObjectFavorited(item)
+                    itemValues[start + 3] = itemValues[start + 3] + ItemFlagFavorite
                 EndIf
                 itemNames[index] = (index as string) + ":" + itemName
             EndIf
@@ -1546,16 +1632,44 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
-    ; wait from the saddle: the companion gets off and waits on foot, because only its riding package keeps it up there
-    If companion && actionName == ACTION_WAIT && IsRideWanted()
-        StopRiding(companion)
-    EndIf
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
+    ElseIf IsRideWanted() && (actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_WAIT || actionName == ACTION_FOLLOW)
+        ; In the saddle these mean: ride there, stay here, ride after someone
+        resultText = DoRideMove(companion, actionName, commandHandle)
+        isOk = _isRideMoveOk
+    ElseIf actionName == ACTION_RENAME_HORSE
+        string renameText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        string newHorseName = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        Actor renamedHorse = GetOwnHorse()
+        If renameText != ""
+            renamedHorse = GetTargetForm(commandHandle) as Actor
+        EndIf
+        If !renamedHorse && renameText == ""
+            resultText = "You have no horse to rename. Name a horse as the target (its ref_id from STATE), or take one as yours first with claim_horse."
+        ElseIf !renamedHorse
+            resultText = "There is no animal with the ref_id '" + renameText + "'. Take the ref_id of the horse from STATE."
+        ElseIf renamedHorse.IsDead()
+            resultText = renamedHorse.GetDisplayName() + " is dead."
+        ElseIf !IsHorse(renamedHorse)
+            resultText = renamedHorse.GetDisplayName() + " is not a horse."
+        ElseIf newHorseName == ""
+            resultText = "rename_horse needs the new name in the detail."
+        Else
+            string oldHorseName = renamedHorse.GetDisplayName()
+            ; "true": the name also replaces one a quest of the game gave the horse (a horse bought at a stable)
+            If renamedHorse.SetDisplayName(newHorseName, true)
+                isOk = true
+                RememberHorseName(renamedHorse, newHorseName)
+                resultText = oldHorseName + " is called " + renamedHorse.GetDisplayName() + " now."
+            Else
+                resultText = "The game did not take the new name for " + oldHorseName + "."
+            EndIf
+        EndIf
     ElseIf (IsRideWanted() || companion.IsOnMount()) && IsOnFootAction(actionName, commandHandle)
         resultText = "You sit on your horse, and this is something you do on foot. Get off first with dismount."
     ElseIf actionName == ACTION_CLAIM_HORSE
@@ -1600,10 +1714,16 @@ int Function RunCommand(int commandHandle, string actionName)
         ElseIf !calledHorse
             calledHorse = GetPlayersHorse()
         EndIf
-        resultText = GetCallProblem(calledHorse, callText)
+        ; Every horse runs to its owner, unless the detail names the other one
+        string callDetail = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        Actor callDestination = Game.GetPlayer()
+        If callDetail == CALL_TO_COMPANION || (callDetail != CALL_TO_PLAYER && calledHorse && calledHorse == GetOwnHorse())
+            callDestination = companion
+        EndIf
+        resultText = GetCallProblem(calledHorse, callText, callDestination)
         If resultText == ""
             isOk = true
-            resultText = CallHorse(calledHorse)
+            resultText = CallHorse(calledHorse, callDestination)
         EndIf
     ElseIf actionName == ACTION_RIDE_LOCK
         isOk = true
@@ -1767,24 +1887,55 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "You look " + moodName + " now. Your face stays like this until 'expression' with 'none'."
         EndIf
     ElseIf actionName == ACTION_GESTURE
-        ; The server knows the gestures by name and sends the ID of the animation. No ID means: end the gesture
+        ; The server knows the gestures by name and sends the ID of the animation, and for a gesture with a short name
+        ; also the animation for sitting and the events. No ID at all means: end the gesture
         int gestureHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
         int gestureLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+        int sitGestureHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SIT_ITEM_HIGH, 0)
+        int sitGestureLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SIT_ITEM_LOW, 0)
         string gestureName = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
-        Idle gestureIdle = GetFormFromHalves(gestureHigh, gestureLow) as Idle
-        If gestureHigh == 0 && gestureLow == 0
+        bool hasStandGesture = gestureHigh != 0 || gestureLow != 0
+        bool hasSitGesture = sitGestureHigh != 0 || sitGestureLow != 0
+        bool isGestureSeated = companion.GetSitState() == SitStateSeated && !companion.IsOnMount()
+        If !hasStandGesture && !hasSitGesture
             isOk = true
-            _isGesturing = true
-            StopGesture(companion)
-            resultText = "You stand normally again."
-        ElseIf !gestureIdle
-            resultText = "The game has no animation for the gesture '" + gestureName + "'."
-        ElseIf companion.PlayIdle(gestureIdle)
-            isOk = true
-            _isGesturing = true
-            resultText = "You do the gesture '" + gestureName + "'. If it goes on and on, 'gesture' with 'stop' ends it."
+            resultText = EndGesture(companion)
+        ElseIf !hasStandGesture && !isGestureSeated
+            resultText = "You only do the gesture '" + gestureName + "' while you sit. Sit down first (sit)."
         Else
-            resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not sitting, not walking."
+            Idle gestureIdle = GetFormFromHalves(gestureHigh, gestureLow) as Idle
+            string gestureEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
+            string gestureStopEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_STOP_EVENT, "")
+            bool isSitGesture = false
+            If isGestureSeated && hasSitGesture
+                gestureIdle = GetFormFromHalves(sitGestureHigh, sitGestureLow) as Idle
+                gestureEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_SIT_EVENT, "")
+                gestureStopEvent = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_SIT_STOP_EVENT, "")
+                isSitGesture = true
+            ElseIf isGestureSeated
+                ; An animation for standing, sent as an event to someone who sits, could tear it out of the seat
+                gestureEvent = ""
+            EndIf
+            string gestureWay = PlayGesture(companion, gestureIdle, gestureEvent)
+            If gestureWay == ""
+                resultText = "The game did not play the gesture '" + gestureName + "'. Gestures work best while you stand around: not fighting, not walking."
+            Else
+                isOk = true
+                resultText = "You do the gesture '" + gestureName + "'."
+                If gestureWay == GestureWayEvent
+                    resultText = resultText + " The game refused to play it the usual way, so its animation event was sent instead."
+                EndIf
+                If !isSitGesture && SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_GESTURE_STATE, 0) != 0
+                    ; A state like being drunk: it is no gesture that ends when the companion moves on
+                    _stateStopEvent = gestureStopEvent
+                    resultText = resultText + " It stays on, also while you walk, until 'gesture' with 'stop'."
+                Else
+                    _isGesturing = true
+                    _isSitGesture = isSitGesture
+                    _gestureStopEvent = gestureStopEvent
+                    resultText = resultText + " If it goes on and on, 'gesture' with 'stop' ends it."
+                EndIf
+            EndIf
         EndIf
     ElseIf actionName == ACTION_FACE
         ; The companion turns to a target (also one far away, as long as it is in the same area) or to a point of the
@@ -1958,7 +2109,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_SHEATHE || actionName == ACTION_DRAW || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
         Return true
     EndIf
-    If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE
+    If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -2121,6 +2272,7 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
         ; The last "true" keeps the game from showing a message. Equipping a potion or food means using it up
         companion.EquipItem(item, false, true)
         If item.GetType() == FormTypePotion
+            PlayUseAnimation(companion, item as Potion)
             Return "You use " + itemName + "."
         EndIf
         Return "You equip " + itemName + "."
@@ -2604,7 +2756,88 @@ EndFunction
 Function StopGesture(Actor companion)
     If _isGesturing
         _isGesturing = false
-        Debug.SendAnimationEvent(companion, AnimationEventDefault)
+        If _isSitGesture
+            ; The default state would tear a sitting companion out of its seat. An animation for sitting is only
+            ; ended by its own event, if the game has one
+            If _gestureStopEvent != ""
+                Debug.SendAnimationEvent(companion, _gestureStopEvent)
+            EndIf
+        Else
+            Debug.SendAnimationEvent(companion, AnimationEventDefault)
+        EndIf
+        _isSitGesture = false
+        _gestureStopEvent = ""
+    EndIf
+EndFunction
+
+; gesture with stop: ends the gesture that plays, and a state like being drunk
+string Function EndGesture(Actor companion)
+    If _stateStopEvent != ""
+        Debug.SendAnimationEvent(companion, _stateStopEvent)
+        _stateStopEvent = ""
+    EndIf
+    If companion.GetSitState() == SitStateSeated && !companion.IsOnMount()
+        ; Never the default state while sitting (see StopGesture)
+        If _isGesturing && _gestureStopEvent != ""
+            Debug.SendAnimationEvent(companion, _gestureStopEvent)
+        EndIf
+        _isGesturing = false
+        _isSitGesture = false
+        _gestureStopEvent = ""
+        Return "You sit normally again, as far as the game lets a gesture be ended while you sit."
+    EndIf
+    _isGesturing = true
+    _isSitGesture = false
+    StopGesture(companion)
+    Return "You stand normally again."
+EndFunction
+
+; Plays an animation: by its entry in the game, and if the game refuses that, by sending its event.
+; Returns how it got played (GestureWayIdle or GestureWayEvent), or "" if it did not
+string Function PlayGesture(Actor companion, Idle gestureIdle, string gestureEvent)
+    If gestureIdle && companion.PlayIdle(gestureIdle)
+        Return GestureWayIdle
+    EndIf
+    If gestureEvent != ""
+        Debug.SendAnimationEvent(companion, gestureEvent)
+        Return GestureWayEvent
+    EndIf
+    Return ""
+EndFunction
+
+; equip on a drink or on food: the companion plays the animation for it, standing or on a chair, unless it is
+; fighting, walking somewhere or riding. Drinks and potions are told by the sound of using them, poisons get none
+Function PlayUseAnimation(Actor companion, Potion usedItem)
+    If !usedItem || usedItem.IsPoison() || companion.IsInCombat() || companion.IsOnMount() || _walkTarget
+        Return
+    EndIf
+    bool isSeated = companion.GetSitState() == SitStateSeated
+    SoundDescriptor useSound = usedItem.GetUseSound()
+    bool isDrink = useSound && useSound.GetFormID() == DrinkSoundFormId
+    If !isDrink && !usedItem.IsFood()
+        Return
+    EndIf
+    int useIdleId = IdleEatFormId
+    string useEvent = IdleEatEvent
+    string useStopEvent = ""
+    If isDrink && isSeated
+        useIdleId = ChairDrinkFormId
+        useEvent = ChairDrinkEvent
+    ElseIf isDrink && usedItem.IsFood()
+        useIdleId = IdleDrinkFormId
+        useEvent = IdleDrinkEvent
+    ElseIf isDrink
+        useIdleId = IdleDrinkPotionFormId
+        useEvent = IdleDrinkPotionEvent
+    ElseIf isSeated
+        useIdleId = ChairEatFormId
+        useEvent = ChairEatEvent
+        useStopEvent = ChairEatStopEvent
+    EndIf
+    If PlayGesture(companion, Game.GetForm(useIdleId) as Idle, useEvent) != ""
+        _isGesturing = true
+        _isSitGesture = isSeated
+        _gestureStopEvent = useStopEvent
     EndIf
 EndFunction
 
@@ -2744,7 +2977,7 @@ Function FinishEntering(Actor companion, ObjectReference doorRef)
     ObjectReference destination = KI_MCP_Gefaehrte_Native.GetDoorDestination(doorRef)
     float[] arrival = KI_MCP_Gefaehrte_Native.GetDoorArrival(doorRef)
     If !destination || arrival.Length < 4
-        AddReport("You could not go through the door: the game does not tell where it leads.")
+        AddFailReport("You could not go through the door: the game does not tell where it leads.")
         Return
     EndIf
     ; The plugin gives the place of arrival as seen from the door on the other side, and the direction faced there
@@ -3040,14 +3273,14 @@ Function FinishPickUp(Actor companion, ObjectReference itemRef)
         _pickUpHigh = 0
         _pickUpLow = 0
         If arrowName == ""
-            AddReport("You took nothing: the arrow was not there any more.")
+            AddFailReport("You took nothing: the arrow was not there any more.")
         Else
             AddReport("You picked up " + arrowName + ".")
         EndIf
         Return
     EndIf
     If !itemRef || itemRef.IsDisabled()
-        AddReport("You took nothing: the thing was not there any more.")
+        AddFailReport("You took nothing: the thing was not there any more.")
         Return
     EndIf
     string itemName = itemRef.GetDisplayName()
@@ -3132,7 +3365,9 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
     EndIf
     string lootName = GetLootName(corpse)
     string reportText = ""
+    bool hasLooted = true
     If corpse.IsDisabled()
+        hasLooted = false
         reportText = "You took nothing: " + lootName + " is gone."
     ElseIf item
         int count = corpse.GetItemCount(item)
@@ -3141,6 +3376,7 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
             corpse.RemoveItem(item, count, true, companion)
             reportText = "You took " + count + " " + item.GetName() + " from " + lootName + "."
         Else
+            hasLooted = false
             reportText = "There was no " + item.GetName() + " in " + lootName + " any more."
         EndIf
     Else
@@ -3156,11 +3392,39 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
     If !hasArrived
         reportText = reportText + " You did not get all the way there."
     EndIf
-    AddReport(reportText)
+    If hasLooted
+        AddReport(reportText)
+    Else
+        AddFailReport(reportText)
+    EndIf
     ; A newer command has the last word on following and waiting
     If _followAfterLoot && ownWalkNumber == _walkNumber
         SetWaiting(companion, false)
     EndIf
+EndFunction
+
+; A report about something that did not work out. The server gets the count with every request: commands that
+; wait for what failed are dropped (see command_chain.py of the server)
+Function AddFailReport(string reportText)
+    _failNumber += 1
+    AddReport(reportText)
+EndFunction
+
+; Whether the companion is in the middle of something that takes time: a walk (also to a seat, a body, a door), walking
+; over to someone to speak, getting on its horse, or riding somewhere. The server lets the next command of a chain
+; wait until this is over
+bool Function IsBusy()
+    If _walkTarget || _isSayDelayed || _isMounting
+        Return true
+    EndIf
+    If !_rideTarget
+        Return false
+    EndIf
+    Actor companion = GetCompanion()
+    If !companion || !IsRideWanted()
+        Return false
+    EndIf
+    Return !_rideTarget.Is3DLoaded() || companion.GetDistance(_rideTarget) > RideArrivedUnits
 EndFunction
 
 ; Keeps a text for the AI until the next state goes out
@@ -3252,7 +3516,7 @@ Event OnSitRequested(string eventName, string strArg, float numArg, Form sender)
     _isSitWalk = false
     If !isSeated
         ReleaseSeat()
-        AddReport("You could not sit down on " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it.")
+        AddFailReport("You could not sit down on " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it.")
     EndIf
 EndEvent
 
@@ -3321,14 +3585,147 @@ EndFunction
 
 ; Whether this command is something the companion can only do on foot
 bool Function IsOnFootAction(string actionName, int commandHandle)
-    If actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_ENTER || actionName == ACTION_LOOT || actionName == ACTION_SIT
+    If actionName == ACTION_ENTER || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_PICK_UP
         Return true
     EndIf
-    If actionName == ACTION_PICK_UP || actionName == ACTION_MAKE_ROOM || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
-        Return true
+    Return actionName == ACTION_MAKE_ROOM || actionName == ACTION_OPEN || actionName == ACTION_CLOSE
+EndFunction
+
+ReferenceAlias Function GetRideWalkAlias(int aliasId)
+    If !_rideWalkQuest
+        _rideWalkQuest = Game.GetFormFromFile(RideWalkQuestFormId, OwnPluginFile) as Quest
     EndIf
-    ; follow with a target: following another character is done on foot
-    Return actionName == ACTION_FOLLOW && SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "") != ""
+    If !_rideWalkQuest
+        Return None
+    EndIf
+    If !_rideWalkQuest.IsRunning()
+        _rideWalkQuest.Start()
+    EndIf
+    Return _rideWalkQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; The marker for a spot the companion rides to or waits at in the saddle (its own, the walks have theirs)
+ObjectReference Function GetRideMarker(Actor companion)
+    If !_rideMarker
+        Form markerBase = Game.GetForm(XMarkerFormId)
+        If markerBase
+            _rideMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
+    Return _rideMarker
+EndFunction
+
+; How fast the rider goes: without isSlow the riding package sets the pace (it runs). With it the companion is also
+; in the alias of the second quest, whose package has no fixed speed
+Function SetRidePace(Actor companion, ObjectReference rideTarget, bool isSlow)
+    ReferenceAlias walkRider = GetRideWalkAlias(RideWalkAliasRider)
+    ReferenceAlias walkLeader = GetRideWalkAlias(RideWalkAliasLeader)
+    If !walkRider || !walkLeader
+        Return
+    EndIf
+    If isSlow && rideTarget
+        walkLeader.ForceRefTo(rideTarget)
+        walkRider.ForceRefTo(companion)
+    Else
+        walkRider.Clear()
+    EndIf
+EndFunction
+
+; move_to, move, wait and follow for a companion that sits on its horse: it rides to the target or the spot and waits
+; there in the saddle, stops where it is, or rides after the player or after another character.
+; Returns the text for the AI and sets _isRideMoveOk
+string Function DoRideMove(Actor companion, string actionName, int commandHandle)
+    _isRideMoveOk = false
+    ReferenceAlias leaderAlias = GetHorseAlias(HorseAliasLeader)
+    If !leaderAlias
+        Return "The game mod is missing its quest for riding. The mod has to be built and installed again."
+    EndIf
+    Actor player = Game.GetPlayer()
+    string targetText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+    ; Without run the companion does not gallop to where it rides
+    bool isSlow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_RUN, 0) == 0
+    ObjectReference rideTarget = None
+    ObjectReference newRideTarget = None
+    Actor newRideLeader = None
+    bool isHolding = true
+    string doneText = ""
+    If actionName == ACTION_FOLLOW
+        rideTarget = player
+        isHolding = false
+        isSlow = false
+        doneText = "You ride after the player again."
+        If targetText != ""
+            ObjectReference namedLeader = GetTargetForm(commandHandle) as ObjectReference
+            string leaderProblem = GetTargetProblem(companion, namedLeader, targetText, false)
+            If leaderProblem == "" && namedLeader != player
+                leaderProblem = GetLeaderProblem(namedLeader)
+            EndIf
+            If leaderProblem != ""
+                Return leaderProblem
+            EndIf
+            If namedLeader != player
+                rideTarget = namedLeader
+                newRideLeader = namedLeader as Actor
+                doneText = "You ride after " + namedLeader.GetDisplayName() + " now, wherever that character goes. 'follow' without a target brings you back to the player."
+            EndIf
+        EndIf
+    ElseIf actionName == ACTION_WAIT
+        rideTarget = GetRideMarker(companion)
+        If !rideTarget
+            Return "The game mod could not mark the spot to wait at."
+        EndIf
+        rideTarget.MoveTo(companion)
+        isSlow = false
+        doneText = "You stop here and wait in the saddle. 'follow' makes you ride after the player again, dismount gets you off."
+    ElseIf actionName == ACTION_MOVE_TO
+        rideTarget = GetTargetForm(commandHandle) as ObjectReference
+        string targetProblem = GetTargetProblem(companion, rideTarget, targetText, false)
+        If targetProblem != ""
+            Return targetProblem
+        EndIf
+        newRideTarget = rideTarget
+        doneText = "You ride to " + rideTarget.GetDisplayName() + " and wait in the saddle a few meters in front of it. 'follow' makes you ride after the player again."
+    Else
+        ; move: the direction in degrees in the count, 1 in the upper half of the item ID if it counts from where the
+        ; companion faces, the meters in the lower half, and the words of the AI in the detail (as for a move on foot)
+        rideTarget = GetRideMarker(companion)
+        If !rideTarget
+            Return "The game mod could not mark the spot to ride to."
+        EndIf
+        float heading = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 0)
+        If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0) != 0
+            heading = heading + companion.GetAngleZ()
+        EndIf
+        int meters = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
+        If meters < 1 || meters > MoveHighestMeters
+            meters = MoveDefaultMeters
+        EndIf
+        float rideUnits = meters * GameUnitsPerMeter
+        rideTarget.MoveTo(companion, Math.sin(heading) * rideUnits, Math.cos(heading) * rideUnits, 0.0, false)
+        ; As for a walk: the marker is put onto the ground, if the plugin can tell where that is
+        If _nativeVersion >= NativeVersionWithLook
+            float markerX = rideTarget.GetPositionX()
+            float markerY = rideTarget.GetPositionY()
+            float groundHeight = KI_MCP_Gefaehrte_Native.GetGroundHeight(companion, markerX, markerY)
+            If groundHeight > GroundHeightLowest
+                rideTarget.SetPosition(markerX, markerY, groundHeight)
+            EndIf
+        EndIf
+        newRideTarget = rideTarget
+        doneText = "You ride about " + meters + " meters " + SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "") + " and wait there in the saddle. 'follow' makes you ride after the player again."
+    EndIf
+    ; What was going on ends, as for every command that sends the companion somewhere
+    StopFleeing()
+    StopGesture(companion)
+    SetWaiting(companion, false)
+    _rideTarget = newRideTarget
+    _rideLeader = newRideLeader
+    _isRideHolding = isHolding
+    leaderAlias.ForceRefTo(rideTarget)
+    SetRidePace(companion, rideTarget, isSlow)
+    companion.EvaluatePackage()
+    _isRideMoveOk = true
+    Return doneText
 EndFunction
 
 ; Whether the game calls this animal a horse. The keyword sits on the race of the animal
@@ -3399,7 +3796,7 @@ EndFunction
 
 ; Returns why this horse cannot be called to the player, or "" if it can.
 ; horseText is the target the AI named, empty if it named none
-string Function GetCallProblem(Actor horse, string horseText)
+string Function GetCallProblem(Actor horse, string horseText, Actor destination)
     If !horse
         If horseText == ""
             Return "There is no horse to call: you have none (claim_horse makes one yours), and the player has not ridden one yet."
@@ -3418,33 +3815,91 @@ string Function GetCallProblem(Actor horse, string horseText)
     If !GetHorseCallAlias(HorseCallAliasHorse) || !GetHorseCallAlias(HorseCallAliasTarget)
         Return "The game mod is missing its quest for calling a horse. The mod has to be built and installed again."
     EndIf
-    Cell playerCell = Game.GetPlayer().GetParentCell()
-    If playerCell && playerCell.IsInterior()
-        Return "The player is indoors. A horse cannot come in there."
+    Cell destinationCell = destination.GetParentCell()
+    If destinationCell && destinationCell.IsInterior()
+        Return "A horse cannot come indoors, and that is where it would have to run to."
     EndIf
     Return ""
 EndFunction
 
 ; Only call this after GetCallProblem said that it can be done. The horse runs to the player and stays there
-string Function CallHorse(Actor horse)
-    Actor player = Game.GetPlayer()
+string Function CallHorse(Actor horse, Actor destination)
     ; A call that is still running is over
     EndHorseCall()
+    string destinationWords = "you"
+    If destination == Game.GetPlayer()
+        destinationWords = "the player"
+    EndIf
     If !horse.Is3DLoaded()
-        ; Too far away to walk: the horse is put to the right of the player, facing the same way
-        float sideAngle = player.GetAngleZ() + 90.0
-        horse.MoveTo(player, HorseCallBesideUnits * Math.sin(sideAngle), HorseCallBesideUnits * Math.cos(sideAngle), 0.0, true)
+        ; Too far away to walk: the horse is put to the right of whom it is to come to, facing the same way
+        float sideAngle = destination.GetAngleZ() + 90.0
+        horse.MoveTo(destination, HorseCallBesideUnits * Math.sin(sideAngle), HorseCallBesideUnits * Math.cos(sideAngle), 0.0, true)
         horse.EvaluatePackage()
-        Return horse.GetDisplayName() + " was too far away to run and is brought to the side of the player. It stays there."
+        Return horse.GetDisplayName() + " was too far away to run and is brought next to " + destinationWords + ". It stays there."
     EndIf
-    If horse.GetDistance(player) <= HorseCallDoneUnits
-        Return horse.GetDisplayName() + " is with the player already."
+    If horse.GetDistance(destination) <= HorseCallDoneUnits
+        Return horse.GetDisplayName() + " is with " + destinationWords + " already."
     EndIf
-    GetHorseCallAlias(HorseCallAliasTarget).ForceRefTo(player)
+    _horseCallTarget = destination
+    GetHorseCallAlias(HorseCallAliasTarget).ForceRefTo(destination)
     GetHorseCallAlias(HorseCallAliasHorse).ForceRefTo(horse)
     horse.EvaluatePackage()
     SendModEvent(EVENT_HORSE_CALL, "", _horseCallNumber as float)
-    Return horse.GetDisplayName() + " runs to the player and stays there."
+    Return horse.GetDisplayName() + " runs to " + destinationWords + " and stays there."
+EndFunction
+
+; Whom the called horse runs to: the companion or the player
+Actor Function GetHorseCallTarget()
+    If _horseCallTarget
+        Return _horseCallTarget
+    EndIf
+    Return Game.GetPlayer()
+EndFunction
+
+; ---------------------------------------------------------------- horse names
+; A name the game mod gave a horse hangs on the horse in the game and is saved with it. It is remembered here as well,
+; because it is not known whether a quest of the game (the one for horses bought at a stable) writes its own name
+; over it again. KeepHorseName gives a horse its name back if it has another one
+
+Function RememberHorseName(Actor horse, string newName)
+    If !_namedHorses || _namedHorses.Length != NamedHorseCount
+        _namedHorses = Utility.CreateFormArray(NamedHorseCount)
+        _horseNames = Utility.CreateStringArray(NamedHorseCount)
+        _nextNamedHorsePlace = 0
+    EndIf
+    int place = _namedHorses.Find(horse)
+    If place < 0
+        place = _namedHorses.Find(None)
+    EndIf
+    If place < 0
+        ; All places are taken: the next one in turn is given up
+        place = _nextNamedHorsePlace
+        _nextNamedHorsePlace = (_nextNamedHorsePlace + 1) % NamedHorseCount
+    EndIf
+    _namedHorses[place] = horse
+    _horseNames[place] = newName
+EndFunction
+
+Function KeepHorseName(Actor horse)
+    If !horse || !_namedHorses || _namedHorses.Length != NamedHorseCount
+        Return
+    EndIf
+    int place = _namedHorses.Find(horse)
+    If place >= 0 && _horseNames[place] != "" && horse.GetDisplayName() != _horseNames[place]
+        horse.SetDisplayName(_horseNames[place], true)
+    EndIf
+EndFunction
+
+; After a save was loaded: every renamed horse gets its name back if it lost it
+Function KeepHorseNames()
+    If !_namedHorses || _namedHorses.Length != NamedHorseCount
+        Return
+    EndIf
+    int place = 0
+    While place < NamedHorseCount
+        KeepHorseName(_namedHorses[place] as Actor)
+        place += 1
+    EndWhile
 EndFunction
 
 ; Takes the called horse out of the alias that makes it run. Its package for staying takes over again
@@ -3475,7 +3930,7 @@ Event OnHorseCallRequested(string eventName, string strArg, float numArg, Form s
             If calledAlias
                 calledHorse = calledAlias.GetActorReference()
             EndIf
-            If !calledHorse || calledHorse.IsDead() || calledHorse.IsBeingRidden() || !calledHorse.Is3DLoaded() || calledHorse.GetDistance(Game.GetPlayer()) <= HorseCallDoneUnits
+            If !calledHorse || calledHorse.IsDead() || calledHorse.IsBeingRidden() || !calledHorse.Is3DLoaded() || calledHorse.GetDistance(GetHorseCallTarget()) <= HorseCallDoneUnits
                 EndHorseCall()
                 Return
             EndIf
@@ -3488,7 +3943,7 @@ Event OnHorseCallRequested(string eventName, string strArg, float numArg, Form s
             lateName = lateAlias.GetActorReference().GetDisplayName()
         EndIf
         EndHorseCall()
-        AddReport(lateName + " did not reach the player in time and stays where it is now.")
+        AddReport(lateName + " did not arrive in time and stays where it is now.")
     EndIf
 EndEvent
 
@@ -3504,6 +3959,7 @@ Function AddPlayerHorseToState(int stateHandle, Actor player)
     If !playersHorse
         Return
     EndIf
+    KeepHorseName(playersHorse)
     int[] horseValues = new int[3]
     horseValues[0] = playersHorse.GetFormID()
     horseValues[1] = -1
@@ -3588,10 +4044,15 @@ string Function StartRiding(Actor companion)
         float sideAngle = companion.GetAngleZ() + 90.0
         ownHorse.MoveTo(companion, HorseBesideUnits * Math.sin(sideAngle), HorseBesideUnits * Math.cos(sideAngle), 0.0, true)
     EndIf
+    _rideTarget = None
+    _rideLeader = None
+    _isRideHolding = false
+    SetRidePace(companion, None, false)
     GetHorseAlias(HorseAliasLeader).ForceRefTo(Game.GetPlayer())
     GetHorseAlias(HorseAliasRider).ForceRefTo(companion)
     ownHorse.EvaluatePackage()
     companion.EvaluatePackage()
+    _isMounting = true
     SendModEvent(EVENT_MOUNT_HELP, "", 0.0)
     Return "You get on " + ownHorse.GetDisplayName() + " and ride after the player. Your next STATE tells you whether you sit on it."
 EndFunction
@@ -3603,17 +4064,24 @@ Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form s
     Actor companion = GetCompanion()
     Actor ownHorse = GetOwnHorse()
     If !companion || !ownHorse || !IsRideWanted() || companion.IsOnMount()
+        _isMounting = false
         Return
     EndIf
     ownHorse.Activate(companion)
     Utility.Wait(MountHelpSeconds + MountHelpSeconds)
+    _isMounting = false
     If IsRideWanted() && !companion.IsOnMount()
-        AddReport("You did not get on your horse. Go closer to it, or try mount again.")
+        AddFailReport("You did not get on your horse. Go closer to it, or try mount again.")
     EndIf
 EndEvent
 
 ; Takes the companion off its horse: out of the alias that lets it ride, and down
 Function StopRiding(Actor companion)
+    _rideTarget = None
+    _rideLeader = None
+    _isRideHolding = false
+    _isMounting = false
+    SetRidePace(companion, None, false)
     ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
     If riderAlias
         Actor rider = riderAlias.GetActorReference()
@@ -3693,6 +4161,7 @@ Function AddHorseToState(int stateHandle, Actor companion)
     If !ownHorse
         Return
     EndIf
+    KeepHorseName(ownHorse)
     int[] horseValues = new int[5]
     horseValues[0] = ownHorse.GetFormID()
     horseValues[1] = -1
@@ -3795,6 +4264,10 @@ EndFunction
 
 ; run in a command that just did what it says. Returns what to add to the result for the AI
 string Function StartRunning(Actor companion, string actionName)
+    If IsRideWanted()
+        ; In the saddle the riding packages set the pace (see DoRideMove)
+        Return ""
+    EndIf
     If !GetLeadAlias(LeadAliasWalker) || !GetLeadAlias(LeadAliasLeader) || !GetRunAlias(RunAliasRunner) || !GetRunAlias(RunAliasTarget)
         Return " But the game mod is missing its quests for running, so you walk."
     EndIf
@@ -3989,7 +4462,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         float steppedUnits = Math.sqrt(steppedX * steppedX + steppedY * steppedY)
         If isMoveWalk
             If steppedUnits < _moveWantedUnits - MoveShortUnits
-                AddReport("You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there.")
+                AddFailReport("You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there.")
             EndIf
             Return
         EndIf
@@ -3998,7 +4471,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
             If TryOtherRoomDirection(companion, walkTarget)
                 Return
             EndIf
-            AddReport("You could not make room: something is in the way on every side you tried.")
+            AddFailReport("You could not make room: something is in the way on every side you tried.")
             EndRoomHold(companion, ownWalkNumber, false)
             Return
         EndIf
@@ -4016,7 +4489,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         If hasArrived || doorDistance <= EnterReachUnits
             FinishEntering(companion, walkTarget)
         Else
-            AddReport("You did not get to the door: you stopped about " + ToMeters(doorDistance) + " meters away from it. Go closer with the player, or try 'enter' again.")
+            AddFailReport("You did not get to the door: you stopped about " + ToMeters(doorDistance) + " meters away from it. Go closer with the player, or try 'enter' again.")
             Debug.Notification("AI companion: did not get to the door")
         EndIf
         Return
@@ -4026,7 +4499,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         If shownTarget
             walkName = shownTarget.GetDisplayName()
         EndIf
-        AddReport("You did not get to " + walkName + ".")
+        AddFailReport("You did not get to " + walkName + ".")
         Debug.Notification("AI companion: did not get to " + walkName)
     EndIf
 EndEvent
@@ -4094,9 +4567,9 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         _isRoomWalk = false
         If _isMoveWalk
             _isMoveWalk = false
-            AddReport("You did not get going: there seems to be no way in that direction. Try another one.")
+            AddFailReport("You did not get going: there seems to be no way in that direction. Try another one.")
         ElseIf !TryOtherRoomDirection(companion, walkTarget)
-            AddReport("You could not make room: you did not get going on any side you tried.")
+            AddFailReport("You could not make room: you did not get going on any side you tried.")
             EndRoomHold(companion, _walkNumber, false)
         EndIf
         Return
@@ -4105,7 +4578,7 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
     If shownTarget
         walkName = shownTarget.GetDisplayName()
     EndIf
-    AddReport("You did not get going towards " + walkName + ". Try 'move_to' again, or 'follow'.")
+    AddFailReport("You did not get going towards " + walkName + ". Try 'move_to' again, or 'follow'.")
     Debug.Notification("AI companion: did not get going towards " + walkName)
 EndEvent
 

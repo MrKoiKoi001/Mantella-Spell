@@ -40,11 +40,11 @@ Data:
 - Key: 1
   Value:
     MutagenObjectType: PackageDataFloat
-    Data: 128
+    Data: 380
 - Key: 2
   Value:
     MutagenObjectType: PackageDataFloat
-    Data: 256
+    Data: 760
 - Key: 6
   Value:
     MutagenObjectType: PackageDataBool

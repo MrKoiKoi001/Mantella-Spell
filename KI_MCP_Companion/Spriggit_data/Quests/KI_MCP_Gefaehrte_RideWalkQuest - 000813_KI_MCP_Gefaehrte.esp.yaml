@@ -1,0 +1,21 @@
+FormKey: 000813:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_RideWalkQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 111
+NextAliasID: 2
+Aliases:
+- Name: WalkRider
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000814:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: WalkLeader
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null
