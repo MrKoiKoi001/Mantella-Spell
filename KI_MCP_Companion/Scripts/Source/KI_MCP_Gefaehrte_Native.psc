@@ -231,3 +231,27 @@ string[] Function GetInventoryLines(ObjectReference owner, int filter, int maxIt
 ; the player there. This puts lookTarget there instead (None = nobody: what the script set counts again).
 ; Returns whether it could be handed to the game; it happens a moment later
 bool Function SetTalkTarget(Actor speaker, ObjectReference lookTarget) global native
+
+; The functions below exist from interface version 20 on. From that version on TickEvents also keeps quests that
+; begin, go on and end, and the hostile characters and traps the companion spots, among the events
+
+; The spells a character knows that give health back, strongest first. forOther: those that work on somebody else
+; (Healing Hands), otherwise those that work on the caster itself (Healing)
+Spell[] Function GetHealSpells(Actor caster, bool forOther) global native
+
+; The chest a merchant sells from and pays out of, or None if the character is no merchant
+ObjectReference Function GetMerchantChest(Actor merchant) global native
+
+; What a merchant offers and what the buyer could sell to it. The first text, its parts separated by tabs: ref ID of
+; the merchant as eight hex digits, status (0 = trades, 1 = no merchant, 2 = does not trade at this hour), gold of
+; the merchant, gold of the buyer, the hours it trades from and to, how many kinds of wares it has, how many kinds
+; of things the buyer could sell, name. Then one text per thing, at most maxItems per side: side (0 = the merchant
+; sells it, 1 = the buyer could sell it), form ID as eight hex digits, how many, form type as SKSE numbers it,
+; price of one piece, name
+string[] Function GetMerchantLines(Actor merchant, Actor buyer, int maxItems) global native
+
+; One thing the buyer wants to buy from a merchant (isBuying) or sell to it. Four numbers: status (0 = fine,
+; 1 = no merchant, 2 = does not trade at this hour, 3 = the merchant does not deal in this kind of thing,
+; 4 = none there, 5 = it is worth nothing), price of one piece, how many there are (with the merchant when buying,
+; with the buyer when selling), and the gold of the one who pays
+int[] Function GetTradeOffer(Actor merchant, Actor buyer, Form item, bool isBuying) global native
