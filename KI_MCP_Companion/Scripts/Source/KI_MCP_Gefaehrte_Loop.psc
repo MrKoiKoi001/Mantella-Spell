@@ -1413,12 +1413,12 @@ bool Function PlayReadAnimation(Actor companion)
         Return false
     EndIf
     int readIdleId = ReadIdleFormId
-    string readEvent = ReadEvent
+    string readStartEvent = ReadEvent
     If isSeated
         readIdleId = ChairReadIdleFormId
-        readEvent = ChairReadEvent
+        readStartEvent = ChairReadEvent
     EndIf
-    If PlayGesture(companion, Game.GetForm(readIdleId) as Idle, readEvent) == ""
+    If PlayGesture(companion, Game.GetForm(readIdleId) as Idle, readStartEvent) == ""
         Return false
     EndIf
     _isGesturing = true
