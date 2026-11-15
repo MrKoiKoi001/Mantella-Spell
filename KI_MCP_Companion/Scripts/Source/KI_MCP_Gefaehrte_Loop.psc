@@ -454,6 +454,11 @@ int Property RideTravelAliasWalker = 2 AutoReadOnly
 float Property RideHoldUnits = 450.0 AutoReadOnly
 float Property RideWatchSeconds = 0.25 AutoReadOnly
 float Property RideWatchLongestSeconds = 180.0 AutoReadOnly
+; A rider that has moved less than RideStillUnits per look for RideStillSeconds, after at least RideStartSeconds,
+; does not get any closer (the target stands where a horse cannot go): it has arrived as far as it can
+float Property RideStillUnits = 10.0 AutoReadOnly
+float Property RideStillSeconds = 3.0 AutoReadOnly
+float Property RideStartSeconds = 4.0 AutoReadOnly
 string Property EVENT_RIDE_WATCH = "KI_MCP_Gefaehrte_RideWatch" AutoReadOnly
 ; Getting off: the game sometimes leaves a character in the saddle although it was told to get off. So the script
 ; looks again after this long, tells it again up to DismountTryCount times, and before try number DismountResetTry
@@ -604,6 +609,7 @@ ObjectReference _stopMarker
 ObjectReference _turnMarker
 bool _isTurning = false
 Quest _rideTravelQuest
+ObjectReference _rideHoldMarker
 int _rideWatchNumber = 0
 Faction _horseFaction
 ; Whom the horse of the companion belonged to before claim_horse (a character or a faction, or nobody), for giving it back
@@ -4269,15 +4275,24 @@ bool Function SetRideTravel(Actor companion, ObjectReference destination, bool i
     Return true
 EndFunction
 
-; The companion stays where it is, in the saddle. The riding package follows whoever is in the alias "Leader", and
-; only a character can be followed: so its own horse goes in there. The rider is always right at it, and stays put
+; The companion stays where it is, in the saddle: a travel package to a marker at its own spot holds it there, the
+; same kind of package that takes it to a thing and keeps it there. (Putting its own horse into the alias "Leader"
+; of the riding package did not hold it in the game: it rode after the player all the same.)
 Function HoldRide(Actor companion)
-    ClearRideTravel()
+    If !_rideHoldMarker
+        Form markerBase = Game.GetForm(XMarkerFormId)
+        If markerBase
+            _rideHoldMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
     SetRidePace(companion, None, false)
-    ReferenceAlias leaderAlias = GetHorseAlias(HorseAliasLeader)
-    Actor ownHorse = GetOwnHorse()
-    If leaderAlias && ownHorse
-        leaderAlias.ForceRefTo(ownHorse)
+    If _rideHoldMarker
+        _rideHoldMarker.MoveTo(companion)
+        If !SetRideTravel(companion, _rideHoldMarker, false)
+            ClearRideTravel()
+        EndIf
+    Else
+        ClearRideTravel()
     EndIf
     _rideTarget = None
     _rideLeader = None
@@ -4290,6 +4305,10 @@ EndFunction
 Event OnRideWatchRequested(string eventName, string strArg, float numArg, Form sender)
     int ownWatchNumber = numArg as int
     float waitedSeconds = 0.0
+    float stillSeconds = 0.0
+    float lastX = 0.0
+    float lastY = 0.0
+    bool hasLastSpot = false
     While ownWatchNumber == _rideWatchNumber && _rideTarget
         Utility.Wait(RideWatchSeconds)
         waitedSeconds += RideWatchSeconds
@@ -4297,6 +4316,16 @@ Event OnRideWatchRequested(string eventName, string strArg, float numArg, Form s
         If ownWatchNumber != _rideWatchNumber || !_rideTarget || !companion || !IsRideWanted()
             Return
         EndIf
+        float movedX = companion.GetPositionX() - lastX
+        float movedY = companion.GetPositionY() - lastY
+        If hasLastSpot && Math.sqrt(movedX * movedX + movedY * movedY) < RideStillUnits
+            stillSeconds += RideWatchSeconds
+        Else
+            stillSeconds = 0.0
+        EndIf
+        lastX = companion.GetPositionX()
+        lastY = companion.GetPositionY()
+        hasLastSpot = true
         ; The riding package stops a good way behind a character it follows, a travel package goes right up to a thing
         float holdUnits = RideHoldUnits
         If _rideTarget as Actor
@@ -4304,6 +4333,12 @@ Event OnRideWatchRequested(string eventName, string strArg, float numArg, Form s
         EndIf
         If companion.GetDistance(_rideTarget) <= holdUnits
             HoldRide(companion)
+            Return
+        EndIf
+        If stillSeconds >= RideStillSeconds && waitedSeconds >= RideStartSeconds
+            int metersLeft = ToMeters(companion.GetDistance(_rideTarget))
+            HoldRide(companion)
+            AddReport("You have ridden as close as your horse gets: about " + metersLeft + " meters are left. You wait there in the saddle.")
             Return
         EndIf
         If waitedSeconds >= RideWatchLongestSeconds
@@ -4423,7 +4458,12 @@ string Function DoRideMove(Actor companion, string actionName, int commandHandle
             Return targetProblem
         EndIf
         newRideTarget = rideTarget
-        doneText = "You ride to " + rideTarget.GetDisplayName() + " and wait in the saddle a few meters in front of it. 'follow' makes you ride after the player again."
+        ; A place on the map has no name the game could tell here
+        string rideName = rideTarget.GetDisplayName()
+        If rideName == ""
+            rideName = "the place"
+        EndIf
+        doneText = "You ride to " + rideName + " and wait in the saddle a few meters in front of it. 'follow' makes you ride after the player again."
     Else
         ; move: the direction in degrees in the count, 1 in the upper half of the item ID if it counts from where the
         ; companion faces, the meters in the lower half, and the words of the AI in the detail (as for a move on foot)
