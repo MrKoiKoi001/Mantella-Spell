@@ -272,6 +272,9 @@ string Property KEY_COMMAND_SAY_NUMBER = "companion_say_number" AutoReadOnly
 ; say: the number of the look the face takes on while the companion speaks (below 0 = none), and how strong in percent
 string Property KEY_COMMAND_FACE = "companion_face" AutoReadOnly
 int Property SayMoodStrength = 70 AutoReadOnly
+; say in a low voice: 1 in the command (the server has made the sound quieter already), and how strong the look is then
+string Property KEY_COMMAND_QUIET = "companion_quiet" AutoReadOnly
+int Property QuietMoodStrength = 35 AutoReadOnly
 ; say: the animation variable of the game that tells how fast a character moves, and below which value it counts as standing
 string Property SpeedVariable = "Speed" AutoReadOnly
 float Property StandingSpeedLimit = 1.0 AutoReadOnly
@@ -428,6 +431,8 @@ float Property MountHelpSeconds = 2.0 AutoReadOnly
 string Property EVENT_MOUNT_HELP = "KI_MCP_Gefaehrte_MountHelp" AutoReadOnly
 ; From interface version 14 on the SKSE plugin tells which horse a character rides (GetMount)
 int Property NativeVersionWithMount = 14 AutoReadOnly
+; From interface version 15 on the SKSE plugin can leave out the places and doors the viewer cannot see (GetVisiblePlaces)
+int Property NativeVersionWithSight = 15 AutoReadOnly
 ; What goes to the server as the name of a mount the game mod cannot name
 string Property UnknownMountName = "?" AutoReadOnly
 ; cast_spell: the companion casts a spell it knows, at once, without the movement of the hands and without paying magicka.
@@ -534,6 +539,7 @@ bool _isSayDelayed = false
 Actor _sayApproachTarget
 Topic _sayApproachTopic
 int _sayApproachMood = -1
+bool _isSayApproachQuiet = false
 string _sayApproachTalk = ""
 int _sayApproachIdleHigh = 0
 int _sayApproachIdleLow = 0
@@ -869,7 +875,14 @@ int Function BuildState()
         If targetLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "quest_targets", targetLines)
         EndIf
-        string[] placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors, viewer)
+        ; visible: only the places and doors in front of the viewer with no wall in between. An older plugin
+        ; cannot check that, then the server leaves out what lies behind the viewer
+        string[] placeLines
+        If isVisibleOnly && _nativeVersion >= NativeVersionWithSight
+            placeLines = KI_MCP_Gefaehrte_Native.GetVisiblePlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors, viewer, VisibleHalfAngleDegrees as int)
+        Else
+            placeLines = KI_MCP_Gefaehrte_Native.GetNearbyPlaces(PlaceRadiusMeters, MaxPlaceMarkers, MaxPlaceDoors, viewer)
+        EndIf
         If placeLines.Length > 0
             SKSE_HTTP.setStringArray(stateHandle, "places", placeLines)
         EndIf
@@ -1804,12 +1817,17 @@ int Function RunCommand(int commandHandle, string actionName)
             ; if the companion really stands around: finding that out takes a moment (see IsStandingAround)
             string lookNote = StartSayLook(companion, commandHandle)
             companion.Say(sayTopic)
-            StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1))
+            bool isQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
+            StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1), isQuiet)
             If IsStandingAround(companion)
                 TurnToSayTarget(companion)
                 PlaySayAnimation(companion, commandHandle)
             EndIf
-            resultText = "You say it aloud." + lookNote
+            If isQuiet
+                resultText = "You say it quietly." + lookNote
+            Else
+                resultText = "You say it aloud." + lookNote
+            EndIf
         EndIf
     ElseIf actionName == ACTION_SAY_TALK
         ; A long sentence: the server sends the next animation for the hands while the companion still speaks
@@ -2435,8 +2453,9 @@ Function TurnToSayTarget(Actor companion)
     EndIf
 EndFunction
 
-; say: the look that goes with how the companion speaks (below 0 = none). A look the AI put on with expression stays
-Function StartSayFace(Actor companion, int mood)
+; say: the look that goes with how the companion speaks (below 0 = none). A look the AI put on with expression stays.
+; isQuiet: the companion speaks in a low voice, then the look is weaker
+Function StartSayFace(Actor companion, int mood, bool isQuiet = false)
     If _expressionName != ""
         _isSayFaceSet = false
         Return
@@ -2448,7 +2467,11 @@ Function StartSayFace(Actor companion, int mood)
         EndIf
         Return
     EndIf
-    companion.SetExpressionOverride(mood, SayMoodStrength)
+    If isQuiet
+        companion.SetExpressionOverride(mood, QuietMoodStrength)
+    Else
+        companion.SetExpressionOverride(mood, SayMoodStrength)
+    EndIf
     _isSayFaceSet = true
 EndFunction
 
@@ -2536,6 +2559,7 @@ string Function StartSayApproach(Actor companion, int commandHandle, Topic sayTo
     _sayApproachTarget = target
     _sayApproachTopic = sayTopic
     _sayApproachMood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1)
+    _isSayApproachQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
     _sayApproachTalk = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
     _sayApproachIdleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
     _sayApproachIdleLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
@@ -2593,7 +2617,7 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     companion.SetLookAt(target, true)
     _sayLookTarget = target
     companion.Say(_sayApproachTopic)
-    StartSayFace(companion, _sayApproachMood)
+    StartSayFace(companion, _sayApproachMood, _isSayApproachQuiet)
     PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
     ; The server's say_end came too early for this sentence, so the end is waited for here.
     ; The game turns a character that speaks towards the player (Say of Skyrim knows nobody else to speak to).

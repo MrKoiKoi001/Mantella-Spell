@@ -150,3 +150,10 @@ float Function GetGroundHeight(Actor origin, float x, float y) global native
 
 ; The horse (or other mount) a character sits on, or None if it rides nothing
 Actor Function GetMount(Actor rider) global native
+
+; The function below exists from interface version 15 on
+
+; Like GetNearbyPlaces, but only the places the viewer can see: within halfAngleDegrees to the left and right of where
+; it faces, and with no wall between its eyes and the place. The game itself can only tell what a character sees
+; for other characters, not for doors
+string[] Function GetVisiblePlaces(int radiusMeters, int maxMarkers, int maxDoors, Actor origin, int halfAngleDegrees) global native
