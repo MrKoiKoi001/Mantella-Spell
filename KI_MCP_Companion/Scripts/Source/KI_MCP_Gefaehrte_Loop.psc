@@ -85,6 +85,40 @@ int Property ValuesPerItem = 4 AutoReadOnly
 ; The fourth number of an item: 1 = the owner wears or holds it, plus ItemFlagFavorite if the player has it among
 ; the favorites (only asked for the inventory of the player: the game has favorites for nobody else)
 int Property ItemFlagFavorite = 2 AutoReadOnly
+; On top of that the fourth number carries what kind of weapon or armor the item is, times ItemKindStep:
+; for a weapon Weapon.GetWeaponType + 1 (1 = fists ... 8 = bow, 10 = crossbow), for armor one of the ItemKind numbers below
+int Property ItemKindStep = 16 AutoReadOnly
+int Property ItemKindShield = 20 AutoReadOnly
+int Property ItemKindBody = 21 AutoReadOnly
+int Property ItemKindHead = 22 AutoReadOnly
+int Property ItemKindHands = 23 AutoReadOnly
+int Property ItemKindFeet = 24 AutoReadOnly
+int Property ItemKindAmulet = 25 AutoReadOnly
+int Property ItemKindRing = 26 AutoReadOnly
+int Property ItemKindOtherArmor = 27 AutoReadOnly
+; The state with an inventory: only the favorites or only what is worn and held, so that the list stays short
+string Property KEY_COMMAND_INVENTORY_FILTER = "companion_inventory_filter" AutoReadOnly
+string Property FILTER_FAVORITES = "favorites" AutoReadOnly
+string Property FILTER_EQUIPPED = "equipped" AutoReadOnly
+int Property EquippedPlaceCount = 11 AutoReadOnly
+; favorite: the companion marks weapons, shields and pieces of armor of its own. The game hands a follower the
+; strongest thing it carries; once a second the script hands it a favorite instead (see CheckFavoriteGear)
+string Property ACTION_FAVORITE = "favorite" AutoReadOnly
+int Property FavoriteItemCount = 20 AutoReadOnly
+; Weapon.GetWeaponType of SKSE
+int Property WeaponTypeBow = 7 AutoReadOnly
+int Property WeaponTypeStaff = 8 AutoReadOnly
+int Property WeaponTypeCrossbow = 9 AutoReadOnly
+; The parts of the body a piece of armor covers, as Armor.GetSlotMask and Actor.GetWornForm of SKSE count them
+int Property SlotMaskHead = 0x00000001 AutoReadOnly
+int Property SlotMaskHair = 0x00000002 AutoReadOnly
+int Property SlotMaskBody = 0x00000004 AutoReadOnly
+int Property SlotMaskHands = 0x00000008 AutoReadOnly
+int Property SlotMaskAmulet = 0x00000020 AutoReadOnly
+int Property SlotMaskRing = 0x00000040 AutoReadOnly
+int Property SlotMaskFeet = 0x00000080 AutoReadOnly
+int Property SlotMaskShield = 0x00000200 AutoReadOnly
+int Property SlotMaskCirclet = 0x00001000 AutoReadOnly
 ; Form types as SKSE numbers them (Form.GetType). Only these kinds can be worn or held
 int Property FormTypeArmor = 26 AutoReadOnly
 int Property FormTypeLight = 31 AutoReadOnly
@@ -433,6 +467,9 @@ string Property EVENT_MOUNT_HELP = "KI_MCP_Gefaehrte_MountHelp" AutoReadOnly
 int Property NativeVersionWithMount = 14 AutoReadOnly
 ; From interface version 15 on the SKSE plugin can leave out the places and doors the viewer cannot see (GetVisiblePlaces)
 int Property NativeVersionWithSight = 15 AutoReadOnly
+; From interface version 16 on the SKSE plugin counts what a dead character carries (GetLootCount), and it tells
+; with the things around how many items a container holds
+int Property NativeVersionWithLoot = 16 AutoReadOnly
 ; What goes to the server as the name of a mount the game mod cannot name
 string Property UnknownMountName = "?" AutoReadOnly
 ; cast_spell: the companion casts a spell it knows, at once, without the movement of the hands and without paying magicka.
@@ -503,6 +540,11 @@ bool _isMounting = false
 int _failNumber = 0
 ; The horses the game mod renamed and their names, and the place the next one takes if all are taken
 Form[] _namedHorses
+; favorite: what the companion marked, and which companion that was (another one starts with an empty list)
+Form[] _favoriteItems
+Actor _favoriteOwner
+bool _hasFavoriteWeapon = false
+bool _hasFavoriteArmor = false
 string[] _horseNames
 int _nextNamedHorsePlace = 0
 ; A gesture that is a state (being drunk): the event that ends it, empty if none is on.
@@ -597,6 +639,7 @@ bool _isHearing = false
 Form _gold
 ; Whose inventory the next state should carry (see INVENTORY_...). Set by a report_state command, used up by BuildState
 string _wantedInventory = ""
+string _wantedInventoryFilter = ""
 ; For INVENTORY_CORPSE: whose body or which container that is
 ObjectReference _wantedCorpse
 ; What the last report_state command asked for besides: how long the lists may get (0 = it named no number),
@@ -1019,13 +1062,18 @@ int Function BuildState()
 
     ; A whole inventory costs seconds, so it only goes along when the server asked for it
     string wantedInventory = _wantedInventory
+    string wantedFilter = _wantedInventoryFilter
     _wantedInventory = ""
+    _wantedInventoryFilter = ""
     If wantedInventory == INVENTORY_PLAYER || wantedInventory == INVENTORY_BOTH
-        AddInventoryToState(stateHandle, player, "inventory_player")
+        AddWantedInventory(stateHandle, player, "inventory_player", wantedFilter)
     EndIf
     If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
-        AddInventoryToState(stateHandle, companion, "inventory_own")
-        AddSpellsToState(stateHandle, companion)
+        AddWantedInventory(stateHandle, companion, "inventory_own", wantedFilter)
+        ; The spells belong to the whole inventory, a short list is asked for to switch weapons quickly
+        If wantedFilter == ""
+            AddSpellsToState(stateHandle, companion)
+        EndIf
     EndIf
     ; On what the player and the companion sit, and where the horse of the companion is
     AddSeatToState(stateHandle, player, "player")
@@ -1352,26 +1400,130 @@ Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyN
     While index < itemCount
         Form item = owner.GetNthForm(index)
         If item
-            string itemName = item.GetName()
-            If itemName != ""
-                int start = 1 + index * ValuesPerItem
-                int itemType = item.GetType()
-                itemValues[start] = item.GetFormID()
-                itemValues[start + 1] = owner.GetItemCount(item)
-                itemValues[start + 2] = itemType
-                If ownerActor && (itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight)
-                    itemValues[start + 3] = ToNumber(ownerActor.IsEquipped(item))
-                EndIf
-                If isPlayerInventory && Game.IsObjectFavorited(item)
-                    itemValues[start + 3] = itemValues[start + 3] + ItemFlagFavorite
-                EndIf
-                itemNames[index] = (index as string) + ":" + itemName
-            EndIf
+            FillItem(itemValues, itemNames, index, owner, ownerActor, isPlayerInventory, item)
         EndIf
         index += 1
     EndWhile
     SKSE_HTTP.setIntArray(stateHandle, keyName, itemValues)
     SKSE_HTTP.setStringArray(stateHandle, keyName + "_names", itemNames)
+EndFunction
+
+; One item of an inventory list: its four numbers and its name (see ValuesPerItem). Nothing for an item without a name
+Function FillItem(int[] itemValues, string[] itemNames, int index, ObjectReference owner, Actor ownerActor, bool isPlayerInventory, Form item)
+    If !item
+        Return
+    EndIf
+    string itemName = item.GetName()
+    If itemName == ""
+        Return
+    EndIf
+    int start = 1 + index * ValuesPerItem
+    int itemType = item.GetType()
+    int flags = 0
+    itemValues[start] = item.GetFormID()
+    itemValues[start + 1] = owner.GetItemCount(item)
+    itemValues[start + 2] = itemType
+    If ownerActor && (itemType == FormTypeWeapon || itemType == FormTypeArmor || itemType == FormTypeAmmo || itemType == FormTypeLight)
+        flags = ToNumber(ownerActor.IsEquipped(item))
+    EndIf
+    If isPlayerInventory && Game.IsObjectFavorited(item)
+        flags += ItemFlagFavorite
+    EndIf
+    If ownerActor && IsFavoriteItem(ownerActor, item)
+        flags += ItemFlagFavorite
+    EndIf
+    itemValues[start + 3] = flags + ItemKindStep * GetItemKind(item, itemType)
+    itemNames[index] = (index as string) + ":" + itemName
+EndFunction
+
+; What kind of weapon or armor an item is (see ItemKindStep), 0 for everything else
+int Function GetItemKind(Form item, int itemType)
+    If itemType == FormTypeWeapon
+        Return (item as Weapon).GetWeaponType() + 1
+    EndIf
+    If itemType != FormTypeArmor
+        Return 0
+    EndIf
+    int slotMask = (item as Armor).GetSlotMask()
+    If Math.LogicalAnd(slotMask, SlotMaskShield) != 0
+        Return ItemKindShield
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskBody) != 0
+        Return ItemKindBody
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskHead + SlotMaskHair + SlotMaskCirclet) != 0
+        Return ItemKindHead
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskHands) != 0
+        Return ItemKindHands
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskFeet) != 0
+        Return ItemKindFeet
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskAmulet) != 0
+        Return ItemKindAmulet
+    ElseIf Math.LogicalAnd(slotMask, SlotMaskRing) != 0
+        Return ItemKindRing
+    EndIf
+    Return ItemKindOtherArmor
+EndFunction
+
+; A short inventory list: only the items handed over (places without an item are left out), in the form of
+; AddInventoryToState. For the favorites of the companion and for what a character wears and holds, which the script
+; can tell without going through the whole inventory
+Function AddItemsToState(int stateHandle, Actor owner, string keyName, Form[] items)
+    int[] itemValues = Utility.CreateIntArray(1 + items.Length * ValuesPerItem)
+    string[] itemNames = Utility.CreateStringArray(items.Length)
+    bool isPlayerInventory = owner == Game.GetPlayer()
+    int foundCount = 0
+    int index = 0
+    While index < items.Length
+        If items[index] && owner.GetItemCount(items[index]) > 0
+            FillItem(itemValues, itemNames, index, owner, owner, isPlayerInventory, items[index])
+            foundCount += 1
+        EndIf
+        index += 1
+    EndWhile
+    itemValues[0] = foundCount
+    SKSE_HTTP.setIntArray(stateHandle, keyName, itemValues)
+    SKSE_HTTP.setStringArray(stateHandle, keyName + "_names", itemNames)
+EndFunction
+
+; What a character holds in its hands and wears on the parts of the body that count. Arrows and spells are not among them
+Form[] Function GetEquippedForms(Actor owner)
+    Form[] equipped = Utility.CreateFormArray(EquippedPlaceCount)
+    int count = AddEquippedForm(equipped, 0, owner.GetEquippedWeapon())
+    count = AddEquippedForm(equipped, count, owner.GetEquippedWeapon(true))
+    count = AddEquippedForm(equipped, count, owner.GetEquippedShield())
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskBody))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskHead))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskHair))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskCirclet))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskHands))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskFeet))
+    count = AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskAmulet))
+    AddEquippedForm(equipped, count, owner.GetWornForm(SlotMaskRing))
+    Return equipped
+EndFunction
+
+int Function AddEquippedForm(Form[] equipped, int count, Form item)
+    If !item || equipped.Find(item) >= 0
+        Return count
+    EndIf
+    equipped[count] = item
+    Return count + 1
+EndFunction
+
+; The inventory of the player or of the companion for the state, the whole of it or only a part (see
+; KEY_COMMAND_INVENTORY_FILTER). The favorites of the player can only be found by going through everything,
+; so there the whole inventory is sent and the server picks them out
+Function AddWantedInventory(int stateHandle, Actor owner, string keyName, string filter)
+    If filter == FILTER_EQUIPPED
+        AddItemsToState(stateHandle, owner, keyName, GetEquippedForms(owner))
+    ElseIf filter == FILTER_FAVORITES && owner != Game.GetPlayer()
+        Form[] favorites = _favoriteItems
+        If owner != _favoriteOwner || favorites.Length == 0
+            favorites = Utility.CreateFormArray(1)
+        EndIf
+        AddItemsToState(stateHandle, owner, keyName, favorites)
+    Else
+        AddInventoryToState(stateHandle, owner, keyName)
+    EndIf
 EndFunction
 
 ; What a dead character carries or a container holds, for loot. Three numbers under "corpse": its ref ID,
@@ -1483,7 +1635,8 @@ Function AddNearbyToState(int stateHandle, Actor player, Actor viewer, float vie
 
     ; Five numbers per character: ref ID, distance to the viewer in meters,
     ; angle from where the viewer faces to the character in degrees (negative = left, positive = right),
-    ; hostile to the player (always 0 for the dead), dead
+    ; hostile to the player, dead. The dead are never hostile: for them the fourth number is how many different
+    ; items they carry, plus 1 (0 = the plugin is too old to count)
     int[] nearbyValues = Utility.CreateIntArray(foundCount * ValuesPerNearby)
     ; One text per character: its place in the list, a colon and its name, eg "0:Bandit".
     ; SKSE_HTTP drops every name that is not valid UTF-8 without a word, so the server could not count the places
@@ -1497,6 +1650,9 @@ Function AddNearbyToState(int stateHandle, Actor player, Actor viewer, float vie
         nearbyValues[valueIndex + 2] = viewer.GetHeadingAngle(nearbyActor) as int
         If deadFlags[index]
             nearbyValues[valueIndex + 4] = 1
+            If _nativeVersion >= NativeVersionWithLoot
+                nearbyValues[valueIndex + 3] = KI_MCP_Gefaehrte_Native.GetLootCount(nearbyActor) + 1
+            EndIf
         Else
             nearbyValues[valueIndex + 3] = ToNumber(nearbyActor.IsHostileToActor(player))
         EndIf
@@ -1613,6 +1769,7 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedSpaceFromFacing = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_FACING, 0) != 0
             _wantedSpaceAngle = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_ANGLE, SpaceFullCircleDegrees)
             _wantedFind = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_FIND, "")
+            _wantedInventoryFilter = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_INVENTORY_FILTER, "")
             _isMuteWanted = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_MUTE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
@@ -2134,7 +2291,7 @@ bool Function IsKnownAction(string actionName)
 EndFunction
 
 bool Function IsItemAction(string actionName)
-    Return actionName == ACTION_EQUIP || actionName == ACTION_UNEQUIP || actionName == ACTION_GIVE || actionName == ACTION_TAKE
+    Return actionName == ACTION_EQUIP || actionName == ACTION_UNEQUIP || actionName == ACTION_GIVE || actionName == ACTION_TAKE || actionName == ACTION_FAVORITE
 EndFunction
 
 ; Does what the command says and returns the text for the AI. Only call this after the command was checked
@@ -2266,6 +2423,9 @@ string Function GetItemProblem(Actor companion, Form item, string targetText, st
     If actionName == ACTION_UNEQUIP && !companion.IsEquipped(item)
         Return "You are not wearing or holding " + item.GetName() + "."
     EndIf
+    If actionName == ACTION_FAVORITE && !(item as Weapon) && !(item as Armor)
+        Return "Only weapons, shields and pieces of armor can be favorites, " + item.GetName() + " is none of them."
+    EndIf
     Return ""
 EndFunction
 
@@ -2273,6 +2433,10 @@ EndFunction
 ; wantedCount is for give and take: how many, 0 = all
 string Function DoItemCommand(Actor companion, string actionName, Form item, int wantedCount)
     string itemName = item.GetName()
+    If actionName == ACTION_FAVORITE
+        ; The count of the command is 1 for on and 0 for off here
+        Return SetFavorite(companion, item, wantedCount != 0)
+    EndIf
     If actionName == ACTION_EQUIP && item.GetType() == FormTypeBook
         ; A spell tome: the companion reads it and knows the spell from then on, as the player would. The tome is used up.
         ; The game does not do this for characters on its own: a tome given to a follower just lies in its inventory
@@ -2292,6 +2456,9 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
         If item.GetType() == FormTypePotion
             PlayUseAnimation(companion, item as Potion)
             Return "You use " + itemName + "."
+        EndIf
+        If IsSwitchedBack(companion, item)
+            Return "You equip " + itemName + ". It is not among your favorites, so you will switch back to a favorite by yourself. Mark it with favorite if you want to keep it on."
         EndIf
         Return "You equip " + itemName + "."
     EndIf
@@ -2316,6 +2483,173 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
         Return "You take " + count + " " + itemName + " from the player."
     EndIf
     Return "You give " + count + " " + itemName + " to the player."
+EndFunction
+
+; --------------------------------------------------------------- favorites
+; The game lets a follower hold and wear the strongest things it carries. The companion says which of its things it
+; wants to fight in: its favorites. Everything else it carries is baggage
+
+bool Function IsFavoriteItem(Actor owner, Form item)
+    If !owner || !item || owner != _favoriteOwner || _favoriteItems.Length == 0
+        Return false
+    EndIf
+    Return _favoriteItems.Find(item) >= 0
+EndFunction
+
+bool Function IsRangedWeapon(Weapon item)
+    int weaponType = item.GetWeaponType()
+    Return weaponType == WeaponTypeBow || weaponType == WeaponTypeCrossbow
+EndFunction
+
+; favorite: puts the mark on an item of the companion or takes it off. Returns the text for the AI
+string Function SetFavorite(Actor companion, Form item, bool isOn)
+    string itemName = item.GetName()
+    If _favoriteOwner != companion || _favoriteItems.Length != FavoriteItemCount
+        ; The first favorite ever, or another companion than before: the list starts empty
+        _favoriteItems = Utility.CreateFormArray(FavoriteItemCount)
+        _favoriteOwner = companion
+    EndIf
+    int place = _favoriteItems.Find(item)
+    If !isOn
+        If place < 0
+            Return itemName + " is not among your favorites."
+        EndIf
+        _favoriteItems[place] = None
+        UpdateFavoriteKinds()
+        Return itemName + " is no favorite of yours any more."
+    EndIf
+    If place >= 0
+        Return itemName + " is among your favorites already."
+    EndIf
+    place = _favoriteItems.Find(None)
+    If place < 0
+        ; All places are taken: one whose item the companion does not carry any more is given up
+        int index = 0
+        While index < _favoriteItems.Length && place < 0
+            If companion.GetItemCount(_favoriteItems[index]) <= 0
+                place = index
+            EndIf
+            index += 1
+        EndWhile
+    EndIf
+    If place < 0
+        Return "You have " + FavoriteItemCount + " favorites already. Take the mark off one of them first (favorite with 'off')."
+    EndIf
+    _favoriteItems[place] = item
+    UpdateFavoriteKinds()
+    CheckFavoriteGear(companion)
+    Return itemName + " is among your favorites now. By yourself you only switch between your favorites from now on."
+EndFunction
+
+Function UpdateFavoriteKinds()
+    _hasFavoriteWeapon = false
+    _hasFavoriteArmor = false
+    int index = 0
+    While index < _favoriteItems.Length
+        Form favorite = _favoriteItems[index]
+        If favorite as Weapon
+            _hasFavoriteWeapon = true
+        ElseIf favorite as Armor
+            _hasFavoriteArmor = true
+        EndIf
+        index += 1
+    EndWhile
+EndFunction
+
+; The favorite weapon the companion carries for close combat or for range: the one with the most damage.
+; If it has none of that kind, any favorite weapon it carries
+Weapon Function FindFavoriteWeapon(Actor companion, bool isRanged)
+    Weapon best
+    Weapon other
+    int index = 0
+    While index < _favoriteItems.Length
+        Weapon candidate = _favoriteItems[index] as Weapon
+        If candidate && companion.GetItemCount(candidate) > 0
+            If IsRangedWeapon(candidate) == isRanged
+                If !best || candidate.GetBaseDamage() > best.GetBaseDamage()
+                    best = candidate
+                EndIf
+            ElseIf !other
+                other = candidate
+            EndIf
+        EndIf
+        index += 1
+    EndWhile
+    If best
+        Return best
+    EndIf
+    Return other
+EndFunction
+
+; The favorite piece of armor the companion carries for this part of the body (a slot mask), or None
+Armor Function FindFavoriteArmor(Actor companion, int slotMask)
+    int index = 0
+    While index < _favoriteItems.Length
+        Armor candidate = _favoriteItems[index] as Armor
+        If candidate && Math.LogicalAnd(candidate.GetSlotMask(), slotMask) != 0 && companion.GetItemCount(candidate) > 0
+            Return candidate
+        EndIf
+        index += 1
+    EndWhile
+    Return None
+EndFunction
+
+; equip: whether the companion will put this item away again by itself, because it has a favorite in its place
+bool Function IsSwitchedBack(Actor companion, Form item)
+    If companion != _favoriteOwner || IsFavoriteItem(companion, item)
+        Return false
+    EndIf
+    Weapon itemWeapon = item as Weapon
+    If itemWeapon
+        Return _hasFavoriteWeapon && itemWeapon.GetWeaponType() != WeaponTypeStaff
+    EndIf
+    Armor itemArmor = item as Armor
+    If itemArmor && _hasFavoriteArmor
+        Return FindFavoriteArmor(companion, itemArmor.GetSlotMask()) != None
+    EndIf
+    Return false
+EndFunction
+
+; Once a second (see OnFollowWatchRequested): if the game has handed the companion a weapon, a shield or a piece of
+; armor that is no favorite, and the companion has a favorite in its place, it takes the favorite instead.
+; The game has no switch that keeps a character from using an item (UnequipItem with abPreventEquip does not work
+; for the weapons of characters), so this looks again and again. Staffs are left alone
+Function CheckFavoriteGear(Actor companion)
+    If !companion || companion != _favoriteOwner || (!_hasFavoriteWeapon && !_hasFavoriteArmor)
+        Return
+    EndIf
+    If companion.IsDead() || !companion.Is3DLoaded()
+        Return
+    EndIf
+    If _hasFavoriteWeapon
+        Weapon heldWeapon = companion.GetEquippedWeapon()
+        If heldWeapon && heldWeapon.GetWeaponType() != WeaponTypeStaff && !IsFavoriteItem(companion, heldWeapon)
+            Weapon wantedWeapon = FindFavoriteWeapon(companion, IsRangedWeapon(heldWeapon))
+            If wantedWeapon
+                companion.EquipItem(wantedWeapon, false, true)
+            EndIf
+        EndIf
+    EndIf
+    If _hasFavoriteArmor
+        CheckFavoriteArmor(companion, SlotMaskShield)
+        CheckFavoriteArmor(companion, SlotMaskBody)
+        CheckFavoriteArmor(companion, SlotMaskHead)
+        CheckFavoriteArmor(companion, SlotMaskHair)
+        CheckFavoriteArmor(companion, SlotMaskCirclet)
+        CheckFavoriteArmor(companion, SlotMaskHands)
+        CheckFavoriteArmor(companion, SlotMaskFeet)
+    EndIf
+EndFunction
+
+Function CheckFavoriteArmor(Actor companion, int slotMask)
+    Form worn = companion.GetWornForm(slotMask)
+    If !worn || IsFavoriteItem(companion, worn)
+        Return
+    EndIf
+    Armor wantedArmor = FindFavoriteArmor(companion, slotMask)
+    If wantedArmor
+        companion.EquipItem(wantedArmor, false, true)
+    EndIf
 EndFunction
 
 ; Whether a character or a thing is in the loaded area, so that the companion can walk to it or look at it
@@ -4376,6 +4710,7 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             UpdatePlayersHorse()
             CheckRideWithPlayer()
             CheckCatchUp()
+            CheckFavoriteGear(GetCompanion())
         EndIf
     EndWhile
 EndEvent

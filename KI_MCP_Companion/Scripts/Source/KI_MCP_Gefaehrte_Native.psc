@@ -157,3 +157,9 @@ Actor Function GetMount(Actor rider) global native
 ; it faces, and with no wall between its eyes and the place. The game itself can only tell what a character sees
 ; for other characters, not for doors
 string[] Function GetVisiblePlaces(int radiusMeters, int maxMarkers, int maxDoors, Actor origin, int halfAngleDegrees) global native
+
+; The function below exists from interface version 16 on. From that version on GetNearbyThings also tells with a
+; container how many items it holds: its flag is 1 if it is locked, otherwise 2 x (that number + 1)
+
+; How many different items a dead character carries or a container holds that can be taken (-1 = cannot tell)
+int Function GetLootCount(ObjectReference holder) global native
