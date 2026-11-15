@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 13 AutoReadOnly
+int Property ProtocolNumber = 14 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -584,6 +584,12 @@ int Property NativeVersionWithTalkTarget = 19 AutoReadOnly
 ; From this version on the plugin finds the spells that heal, knows what a merchant offers and at which price,
 ; and keeps quests and what the companion spots among its events
 int Property NativeVersionWithTrade = 20 AutoReadOnly
+; From this version on the plugin answers in one go what the script asked the game one by one for the state: the
+; characters around (GetNearbyValues) and the plain facts about the player and the companion (GetActorNumbers).
+; A script waits for the next picture of the game with nearly every question, which made a state take six seconds
+int Property NativeVersionWithQuickState = 21 AutoReadOnly
+; How many numbers GetActorNumbers returns (see there for what they are)
+int Property ActorNumberCount = 14 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
 ; At the end it follows the player again
@@ -619,6 +625,9 @@ int Property OfferClosed = 2 AutoReadOnly
 int Property OfferNotDealtIn = 3 AutoReadOnly
 int Property OfferNoneThere = 4 AutoReadOnly
 int Property OfferWorthless = 5 AutoReadOnly
+; buy and sell with several items in one command carry them like give and take do (see KEY_COMMAND_ITEMS).
+; The answer names at most this many things that could not be traded with their reason
+int Property TradeNamedFailures = 5 AutoReadOnly
 ; say to someone other than the player without stopping for it (the companion walks, follows someone, fights or
 ; sits): own event that keeps the eyes on that character for the length of the sentence, and how long that is
 ; taken to be if the server did not tell
@@ -946,6 +955,8 @@ bool _isTradeOk = false
 ; What the plugin said about the last offer: the price of one piece and how many change hands
 int _tradePrice = 0
 int _tradeDoneCount = 0
+; buy and sell with several items: the numbers of KEY_COMMAND_ITEMS (empty = one item, _tradeItem)
+int[] _tradeValues
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
 ; It still counts as busy, so that the next command of a chain waits until it stands again
 bool _isLooting = false
@@ -1157,21 +1168,42 @@ int Function BuildState()
     ; Health in percent, in combat, position x, y and z in game units,
     ; direction the player faces in degrees (0 = north, 90 = east), indoors, weapon drawn,
     ; sitting and sleeping as the game tells them (3 = seated, 3 = asleep, see GetSitState and GetSleepState), sneaking
-    float playerX = player.GetPositionX()
-    float playerY = player.GetPositionY()
-    float playerZ = player.GetPositionZ()
+    float playerX = 0.0
+    float playerY = 0.0
+    float playerZ = 0.0
     int[] playerValues = new int[11]
+    ; The plugin answers most of this in one go (see NativeVersionWithQuickState)
+    int[] playerNumbers
+    If _nativeVersion >= NativeVersionWithQuickState
+        playerNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(player, None)
+    EndIf
+    If playerNumbers.Length >= ActorNumberCount
+        playerX = playerNumbers[3] as float
+        playerY = playerNumbers[4] as float
+        playerZ = playerNumbers[5] as float
+        playerValues[1] = playerNumbers[2]
+        playerValues[2] = playerNumbers[3]
+        playerValues[3] = playerNumbers[4]
+        playerValues[4] = playerNumbers[5]
+        playerValues[5] = playerNumbers[6]
+        playerValues[7] = playerNumbers[7]
+        playerValues[10] = playerNumbers[8]
+    Else
+        playerX = player.GetPositionX()
+        playerY = player.GetPositionY()
+        playerZ = player.GetPositionZ()
+        playerValues[1] = ToNumber(player.IsInCombat())
+        playerValues[2] = playerX as int
+        playerValues[3] = playerY as int
+        playerValues[4] = playerZ as int
+        playerValues[5] = player.GetAngleZ() as int
+        playerValues[7] = ToNumber(player.IsWeaponDrawn())
+        playerValues[10] = ToNumber(player.IsSneaking())
+    EndIf
     playerValues[0] = GetHealthPercent(player)
-    playerValues[1] = ToNumber(player.IsInCombat())
-    playerValues[2] = playerX as int
-    playerValues[3] = playerY as int
-    playerValues[4] = playerZ as int
-    playerValues[5] = player.GetAngleZ() as int
     playerValues[6] = ToNumber(isInterior)
-    playerValues[7] = ToNumber(player.IsWeaponDrawn())
     playerValues[8] = player.GetSitState()
     playerValues[9] = player.GetSleepState()
-    playerValues[10] = ToNumber(player.IsSneaking())
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; Only when the server asked for them: level, skills and so on. They cost about thirty questions to the game
@@ -1420,7 +1452,19 @@ int Function BuildState()
 
     float scanStartTime = Utility.GetCurrentRealTime()
     _isVisibleOnlyScan = isVisibleOnly
-    If isRemoteViewer
+    ; The plugin lists the characters around in one go. Not for 'visible': what the viewer can see, only the game tells
+    bool isNearbyListed = false
+    If !isRemoteViewer && !isVisibleOnly && _nativeVersion >= NativeVersionWithQuickState
+        bool isViewerIndoors = isInterior
+        If viewer != player
+            Cell quickViewerCell = viewer.GetParentCell()
+            isViewerIndoors = quickViewerCell && quickViewerCell.IsInterior()
+        EndIf
+        isNearbyListed = AddQuickNearby(stateHandle, viewer, companion, isViewerIndoors, listLimit)
+    EndIf
+    If isNearbyListed
+        ; Done
+    ElseIf isRemoteViewer
         ; The characters in a building that is not loaded cannot be asked anything by a script. The plugin lists them:
         ; one text per character (see KI_MCP_Gefaehrte_Native.psc)
         string[] characterLines = KI_MCP_Gefaehrte_Native.GetCharactersInCell(companion, listLimit)
@@ -1460,21 +1504,43 @@ EndFunction
 ; keeps its weapon put away because of sheathe, running, sneaking, and how it sneaks because of sneak (see SneakModeAuto)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
     int[] companionValues = new int[22]
-    companionValues[0] = companion.GetFormID()
+    ; The plugin answers most of the plain facts in one go (see NativeVersionWithQuickState)
+    int[] companionNumbers
+    If _nativeVersion >= NativeVersionWithQuickState
+        companionNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(companion, player)
+    EndIf
+    bool isQuick = companionNumbers.Length >= ActorNumberCount
+    bool isToldToWait = false
+    If isQuick
+        companionValues[0] = companionNumbers[0]
+        companionValues[2] = companionNumbers[1]
+        companionValues[3] = companionNumbers[2]
+        isToldToWait = companionNumbers[13] != 0
+        ; Far away (eg left behind in another place) the game has no position worth measuring
+        If companionNumbers[9] != 0
+            companionValues[5] = 1
+            companionValues[6] = companionNumbers[10]
+            companionValues[7] = companionNumbers[11]
+            companionValues[9] = companionNumbers[6]
+        EndIf
+        companionValues[8] = companionNumbers[12]
+    Else
+        companionValues[0] = companion.GetFormID()
+        companionValues[2] = ToNumber(companion.IsDead())
+        companionValues[3] = ToNumber(companion.IsInCombat())
+        isToldToWait = IsWaiting(companion)
+        If companion.Is3DLoaded()
+            companionValues[5] = 1
+            companionValues[6] = ToMeters(companion.GetDistance(player))
+            companionValues[7] = player.GetHeadingAngle(companion) as int
+            companionValues[9] = companion.GetAngleZ() as int
+        EndIf
+        If companionTarget
+            companionValues[8] = companionTarget.GetFormID()
+        EndIf
+    EndIf
     companionValues[1] = GetHealthPercent(companion)
-    companionValues[2] = ToNumber(companion.IsDead())
-    companionValues[3] = ToNumber(companion.IsInCombat())
-    companionValues[4] = ToNumber(IsWaiting(companion) || (_isRideHolding && !_rideTarget && IsRideWanted()))
-    ; Far away (eg left behind in another place) the game has no position worth measuring
-    If companion.Is3DLoaded()
-        companionValues[5] = 1
-        companionValues[6] = ToMeters(companion.GetDistance(player))
-        companionValues[7] = player.GetHeadingAngle(companion) as int
-        companionValues[9] = companion.GetAngleZ() as int
-    EndIf
-    If companionTarget
-        companionValues[8] = companionTarget.GetFormID()
-    EndIf
+    companionValues[4] = ToNumber(isToldToWait || (_isRideHolding && !_rideTarget && IsRideWanted()))
     companionValues[10] = ToNumber(_fleeingActor == companion)
     ; The marker of make_room and move is nothing the AI could name, so that walk is not told.
     ; For move_to with a distance the marker stands for the one it was put in front of
@@ -1487,7 +1553,11 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionValues[11] = _rideTarget.GetFormID()
     EndIf
     companionValues[12] = companion.GetSitState()
-    companionValues[13] = ToNumber(companion.IsWeaponDrawn())
+    If isQuick
+        companionValues[13] = companionNumbers[7]
+    Else
+        companionValues[13] = ToNumber(companion.IsWeaponDrawn())
+    EndIf
     If _lookTarget
         companionValues[14] = _lookTarget.GetFormID()
     EndIf
@@ -1498,7 +1568,11 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     EndIf
     companionValues[16] = ToNumber(_keepsWeaponAway)
     companionValues[17] = ToNumber(companion.IsRunning() || companion.IsSprinting())
-    companionValues[18] = ToNumber(companion.IsSneaking())
+    If isQuick
+        companionValues[18] = companionNumbers[8]
+    Else
+        companionValues[18] = ToNumber(companion.IsSneaking())
+    EndIf
     companionValues[19] = _sneakMode
     ; Below how many percent of health the companion heals by itself (0 = it does not)
     If !_isAutoHealOff
@@ -2089,6 +2163,24 @@ Function AddNearbyToState(int stateHandle, Actor player, Actor viewer, float vie
     EndWhile
     SKSE_HTTP.setIntArray(stateHandle, "nearby", nearbyValues)
     SKSE_HTTP.setStringArray(stateHandle, "nearby_names", nearbyNames)
+EndFunction
+
+; The same list from the plugin, in one go instead of several questions per character (see NativeVersionWithQuickState).
+; Returns false if the plugin cannot look around in this game: then the script has to do it itself
+bool Function AddQuickNearby(int stateHandle, Actor viewer, Actor companion, bool isIndoors, int listLimit)
+    float radiusMeters = NearbyOutdoorRadiusMeters
+    If isIndoors
+        radiusMeters = NearbyRadiusMeters
+    EndIf
+    int[] nearbyValues = KI_MCP_Gefaehrte_Native.GetNearbyValues(viewer, companion, radiusMeters as int, listLimit)
+    If nearbyValues.Length == 1
+        Return false
+    EndIf
+    If nearbyValues.Length >= ValuesPerNearby
+        SKSE_HTTP.setIntArray(stateHandle, "nearby", nearbyValues)
+        SKSE_HTTP.setStringArray(stateHandle, "nearby_names", KI_MCP_Gefaehrte_Native.GetNearbyNames())
+    EndIf
+    Return true
 EndFunction
 
 ; Puts the candidate into the list if it is a character in reach, living or dead, that is not listed yet.
@@ -2688,9 +2780,16 @@ int Function RunCommand(int commandHandle, string actionName)
             lootItem = GetFormFromHalves(itemHigh, itemLow)
             resultText = GetLootProblem(target, lootItem, itemHigh != 0 || itemLow != 0)
         EndIf
+        int[] tradeValues
         If resultText == "" && isTrade
-            tradeItem = GetFormFromHalves(SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0))
-            resultText = GetTradeProblem(companion, target, tradeItem, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1), actionName == ACTION_BUY)
+            ; Several items come as a list of numbers, like those of give and take
+            tradeValues = SKSE_HTTP.getIntArray(commandHandle, KEY_COMMAND_ITEMS)
+            If tradeValues.Length >= ValuesPerHandOver
+                resultText = GetMerchantProblem(companion, target)
+            Else
+                tradeItem = GetFormFromHalves(SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0))
+                resultText = GetTradeProblem(companion, target, tradeItem, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1), actionName == ACTION_BUY)
+            EndIf
         EndIf
         If resultText == ""
             isOk = true
@@ -2726,6 +2825,7 @@ int Function RunCommand(int commandHandle, string actionName)
             ElseIf actionName == ACTION_LEAD
                 resultText = StartLeading(companion, target, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1))
             ElseIf isTrade
+                _tradeValues = tradeValues
                 resultText = StartTrade(companion, target as Actor, tradeItem, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1), actionName == ACTION_BUY, followAgain)
                 isOk = _isTradeOk
             Else
@@ -6140,21 +6240,29 @@ EndFunction
 ; numArg is the number of this watch: a newer one (after loading a game) makes this one end
 Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form sender)
     int ownWatchNumber = numArg as int
+    int watchRound = 0
     While ownWatchNumber == _followWatchNumber
         Utility.Wait(FollowWatchSeconds)
         If ownWatchNumber == _followWatchNumber
+            watchRound += 1
+            Actor watched = GetCompanion()
             ; Whoever follows the player at the moment is the one whose own sentences are cut off. Looking every
             ; second makes a change of follower count at once, also while the AI asks for no state
-            UpdateMutedSpeaker(GetCompanion())
-            UpdatePlayersHorse()
-            CheckRideWithPlayer()
+            UpdateMutedSpeaker(watched)
             CheckCatchUp()
-            CheckFavoriteGear(GetCompanion())
-            UpdateSneak(GetCompanion())
-            UpdateAutoHeal(GetCompanion())
+            UpdateSneak(watched)
+            ; Every question to the game costs the script a picture of the game, and all of this together took about
+            ; as long as the second between two rounds. So what can wait a moment longer only runs every other round
+            If watchRound % 2 == 0
+                UpdatePlayersHorse()
+                CheckRideWithPlayer()
+            Else
+                CheckFavoriteGear(watched)
+                UpdateAutoHeal(watched)
+            EndIf
             ; The plugin learns who the companion is, and keeps what has no event of the game (see TickEvents)
             If _nativeVersion >= NativeVersionWithEvents
-                KI_MCP_Gefaehrte_Native.TickEvents(GetCompanion())
+                KI_MCP_Gefaehrte_Native.TickEvents(watched)
             EndIf
         EndIf
     EndWhile
@@ -6847,8 +6955,8 @@ string Function GetOfferProblem(Actor companion, Actor merchant, Form item, int 
     Return ""
 EndFunction
 
-; Returns why the companion cannot trade this with the target, or "" if it can
-string Function GetTradeProblem(Actor companion, ObjectReference target, Form item, int wantedCount, bool isBuying)
+; Returns why the companion cannot trade with the target at all, or "" if it can
+string Function GetMerchantProblem(Actor companion, ObjectReference target)
     If _nativeVersion < NativeVersionWithTrade
         Return "Trading needs the newest plugin of the game mod (KI_MCP_Gefaehrte.dll), which is not running."
     EndIf
@@ -6865,6 +6973,19 @@ string Function GetTradeProblem(Actor companion, ObjectReference target, Form it
     If merchant.IsInCombat()
         Return merchant.GetDisplayName() + " is fighting and does not trade now."
     EndIf
+    If !KI_MCP_Gefaehrte_Native.GetMerchantChest(merchant)
+        Return merchant.GetDisplayName() + " is no merchant."
+    EndIf
+    Return ""
+EndFunction
+
+; Returns why the companion cannot trade this with the target, or "" if it can
+string Function GetTradeProblem(Actor companion, ObjectReference target, Form item, int wantedCount, bool isBuying)
+    string merchantProblem = GetMerchantProblem(companion, target)
+    If merchantProblem != ""
+        Return merchantProblem
+    EndIf
+    Actor merchant = target as Actor
     If !item || (item as ObjectReference)
         Return "The ID in 'detail' is not an item. Take it from the list STATE gives you for this merchant (argument 'merchant')."
     EndIf
@@ -6913,13 +7034,17 @@ string Function StartTrade(Actor companion, Actor merchant, Form item, int wante
     If isBuying
         tradeWord = "buy"
     EndIf
-    Return "You walk over to " + merchant.GetDisplayName() + " to " + tradeWord + " " + item.GetName() + ". Your next STATE tells you how it went."
+    string tradeWhat = "the things you named"
+    If item
+        tradeWhat = item.GetName()
+    EndIf
+    Return "You walk over to " + merchant.GetDisplayName() + " to " + tradeWord + " " + tradeWhat + ". Your next STATE tells you how it went."
 EndFunction
 
 ; Called when the walk to the merchant is over
 Function FinishTrade(Actor companion)
     Actor merchant = _tradeMerchant
-    If !merchant || !_tradeItem
+    If !merchant || (!_tradeItem && _tradeValues.Length < ValuesPerHandOver)
         Return
     EndIf
     If companion.GetDistance(merchant) > TradeReachUnits + GetHalfSize(merchant)
@@ -6940,6 +7065,9 @@ EndFunction
 ; _isTradeOk tells whether it was done
 string Function DoTrade(Actor companion)
     _isTradeOk = false
+    If _tradeValues.Length >= ValuesPerHandOver
+        Return DoTradeList(companion)
+    EndIf
     Actor merchant = _tradeMerchant
     Form item = _tradeItem
     bool isBuying = _isTradeBuying
@@ -6980,6 +7108,90 @@ string Function DoTrade(Actor companion)
         Return "You bought " + count + " " + item.GetName() + " from " + merchant.GetDisplayName() + " for " + total + " gold. You have " + goldNow + " gold left."
     EndIf
     Return "You sold " + count + " " + item.GetName() + " to " + merchant.GetDisplayName() + " for " + total + " gold. You have " + goldNow + " gold now."
+EndFunction
+
+; buy and sell with several items in one command: one movement of the hand, then every item is traded on its own.
+; Returns the text for the AI, which names what was traded for how much and what was not. _isTradeOk tells whether
+; anything was traded
+string Function DoTradeList(Actor companion)
+    _isTradeOk = false
+    Actor merchant = _tradeMerchant
+    bool isBuying = _isTradeBuying
+    int[] tradeValues = _tradeValues
+    string merchantName = merchant.GetDisplayName()
+    ObjectReference chest = KI_MCP_Gefaehrte_Native.GetMerchantChest(merchant)
+    Form gold = GetGold()
+    If !chest || !gold
+        Return "The game mod could not reach what " + merchantName + " trades with."
+    EndIf
+    If IsHoldingStill(companion) && CanPlayTaskAnimation(companion)
+        TurnTo(companion, companion.GetAngleZ() + companion.GetHeadingAngle(merchant))
+    EndIf
+    PlayHandOverAnimation(companion, ACTION_GIVE, merchant)
+    ; What the script moves itself is no news for the events of the plugin
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
+    EndIf
+    string doneText = ""
+    string failedText = ""
+    int doneKinds = 0
+    int failedKinds = 0
+    int totalGold = 0
+    int place = 0
+    int index = 0
+    While index + ValuesPerHandOver <= tradeValues.Length
+        place += 1
+        Form item = GetFormFromHalves(tradeValues[index], tradeValues[index + 1])
+        string problem = ""
+        If !item || (item as ObjectReference)
+            problem = "Number " + place + " of your list is no item."
+        Else
+            problem = GetOfferProblem(companion, merchant, item, tradeValues[index + 2], isBuying)
+        EndIf
+        If problem != ""
+            failedKinds += 1
+            If failedKinds <= TradeNamedFailures
+                failedText = failedText + " " + problem
+            EndIf
+        Else
+            int count = _tradeDoneCount
+            int total = _tradePrice * count
+            ; The "true" keeps the game from showing a message
+            If isBuying
+                chest.RemoveItem(item, count, true, companion)
+                companion.RemoveItem(gold, total, true, chest)
+            Else
+                companion.RemoveItem(item, count, true, chest)
+                chest.RemoveItem(gold, total, true, companion)
+            EndIf
+            doneKinds += 1
+            totalGold += total
+            If doneKinds <= HandOverNamedCount
+                doneText = AddToList(doneText, count + " " + item.GetName() + " for " + total)
+            EndIf
+        EndIf
+        index += ValuesPerHandOver
+    EndWhile
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(false)
+    EndIf
+    _isTradeOk = doneKinds > 0
+    If doneKinds > HandOverNamedCount
+        doneText = doneText + " and " + (doneKinds - HandOverNamedCount) + " more kinds of items"
+    EndIf
+    string tradeText = "Nothing was traded."
+    If doneKinds > 0 && isBuying
+        tradeText = "You bought from " + merchantName + ": " + doneText + ". That cost you " + totalGold + " gold, you have " + companion.GetItemCount(gold) + " left."
+    ElseIf doneKinds > 0
+        tradeText = "You sold to " + merchantName + ": " + doneText + ". That brought you " + totalGold + " gold, you have " + companion.GetItemCount(gold) + " now."
+    EndIf
+    If failedKinds > 0
+        tradeText = tradeText + " Not traded:" + failedText
+        If failedKinds > TradeNamedFailures
+            tradeText = tradeText + " And " + (failedKinds - TradeNamedFailures) + " more that did not work."
+        EndIf
+    EndIf
+    Return tradeText
 EndFunction
 
 ; ----------------------------------------------------------------------- flee

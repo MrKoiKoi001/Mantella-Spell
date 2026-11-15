@@ -255,3 +255,22 @@ string[] Function GetMerchantLines(Actor merchant, Actor buyer, int maxItems) gl
 ; 4 = none there, 5 = it is worth nothing), price of one piece, how many there are (with the merchant when buying,
 ; with the buyer when selling), and the gold of the one who pays
 int[] Function GetTradeOffer(Actor merchant, Actor buyer, Form item, bool isBuying) global native
+
+; The functions below exist from interface version 21 on. They answer in one go what the script asked the game
+; one by one: a script waits for the next picture of the game with nearly every question
+
+; The plain facts about a character. viewer: from whom the distance and the direction count (None = both stay 0).
+; The numbers: ref ID, dead, in a fight, position x, y, z, the direction it faces in degrees, weapon drawn, sneaking,
+; in the loaded area, distance to the viewer in meters, angle from where the viewer faces in degrees (negative =
+; left), ref ID of whom it fights (0 = nobody), told to wait by the player
+int[] Function GetActorNumbers(Actor character, Actor viewer) global native
+
+; The characters around the viewer, living and dead, without the player and the companion, at most maxCharacters
+; within radiusMeters: whom the companion fights first, then the hostile ones, the other living ones and the dead,
+; each nearest first. Five numbers per character: ref ID, distance to the viewer in meters, angle from where the
+; viewer faces in degrees (negative = left), hostile to the player (for the dead: how many different items they
+; carry, plus 1), dead. A single -1 means: the plugin cannot look around in this game
+int[] Function GetNearbyValues(Actor viewer, Actor companion, int radiusMeters, int maxCharacters) global native
+
+; The names of the characters GetNearbyValues listed last: the place in that list, a colon and the name
+string[] Function GetNearbyNames() global native
