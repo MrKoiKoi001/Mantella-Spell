@@ -207,6 +207,12 @@ float Property MoveToNearEnoughUnits = 35.0 AutoReadOnly
 int Property MoveDefaultMeters = 5 AutoReadOnly
 int Property MoveHighestMeters = 30 AutoReadOnly
 float Property MoveShortUnits = 105.0 AutoReadOnly
+; move: a companion that got at least this part of the way has done it, the rest is only told. Below that it failed
+float Property MoveEnoughPart = 0.7 AutoReadOnly
+; move_to: the game often says that a walk did not arrive although the companion stands in front of its target
+; (a character or a horse is in the way of its own spot). Within this distance, plus half the size of the target,
+; the companion has arrived
+float Property WalkCloseUnits = 300.0 AutoReadOnly
 ; The quest of this mod that makes the companion sit: whoever is in its alias "Sitter" gets a package of the game
 ; that walks to whatever is in its alias "Seat" and uses it. Scripts cannot seat a character on their own
 int Property SitQuestFormId = 0x00000801 AutoReadOnly
@@ -382,6 +388,13 @@ string Property ACTION_LOOT = "loot" AutoReadOnly
 ; its horse and rides after the player. dismount: it gets off. ride_lock: with "on" in the detail the companion no
 ; longer mounts and dismounts when the player does, with "off" it does again
 string Property ACTION_CLAIM_HORSE = "claim_horse" AutoReadOnly
+; release_horse: the companion gives a horse back that it took with claim_horse
+string Property ACTION_RELEASE_HORSE = "release_horse" AutoReadOnly
+; The horse of the companion belongs to a faction of this mod that the player and the companion are both in: the
+; game lets a character ride a horse it owns, and the player can still ride it without stealing it
+int Property HorseFactionFormId = 0x00000818 AutoReadOnly
+; "PlayerFaction" of the game: a horse the player bought belongs to it
+int Property PlayerFactionFormId = 0x00000DB1 AutoReadOnly
 string Property ACTION_MOUNT = "mount" AutoReadOnly
 string Property ACTION_DISMOUNT = "dismount" AutoReadOnly
 string Property ACTION_RIDE_LOCK = "ride_lock" AutoReadOnly
@@ -401,6 +414,32 @@ int Property RideWalkAliasRider = 0 AutoReadOnly
 int Property RideWalkAliasLeader = 1 AutoReadOnly
 ; A rider counts as arrived once it is this close to where it rides to (the riding package stops a bit before that)
 float Property RideArrivedUnits = 900.0 AutoReadOnly
+; Riding to a thing or a spot: the follow package of the horse quest only follows characters, so a travel package
+; with "Ride Horse if possible?" takes the rider there. Its quest has a rider that gallops (alias 0), the target
+; (alias 1) and a rider that goes slowly (alias 2)
+int Property RideTravelQuestFormId = 0x00000815 AutoReadOnly
+int Property RideTravelAliasRider = 0 AutoReadOnly
+int Property RideTravelAliasTarget = 1 AutoReadOnly
+int Property RideTravelAliasWalker = 2 AutoReadOnly
+; The rider has arrived when it is this close. That is further out than where the travel package ends (150 units):
+; a travel package that ends may make its rider get off
+float Property RideHoldUnits = 450.0 AutoReadOnly
+float Property RideWatchSeconds = 0.25 AutoReadOnly
+float Property RideWatchLongestSeconds = 180.0 AutoReadOnly
+string Property EVENT_RIDE_WATCH = "KI_MCP_Gefaehrte_RideWatch" AutoReadOnly
+; Getting off: the game sometimes leaves a character in the saddle although it was told to get off. So the script
+; looks again after this long, tells it again up to DismountTryCount times, and before try number DismountResetTry
+; it resets the mind of the character (what the console command resetai does)
+float Property DismountHelpSeconds = 1.5 AutoReadOnly
+float Property DismountResetSeconds = 0.5 AutoReadOnly
+int Property DismountTryCount = 4 AutoReadOnly
+int Property DismountResetTry = 3 AutoReadOnly
+string Property EVENT_DISMOUNT_HELP = "KI_MCP_Gefaehrte_DismountHelp" AutoReadOnly
+; say: how loud the game takes what the companion says, for characters that listen for enemies (0 to 100,
+; see ObjectReference.CreateDetectionEvent). In a low voice it makes no noise at all
+string Property KEY_COMMAND_LOUD = "companion_loud" AutoReadOnly
+int Property SayNoiseNormal = 40 AutoReadOnly
+int Property SayNoiseLoud = 100 AutoReadOnly
 ; With every request to the server: whether the companion is in the middle of something that takes time, and how
 ; many things it started have failed. The server needs both for commands that wait for each other
 string Property KEY_BUSY = "companion_busy" AutoReadOnly
@@ -462,6 +501,13 @@ string Property HorseKeyword = "ActorTypeHorse" AutoReadOnly
 float Property HorseSummonUnits = 512.0 AutoReadOnly
 float Property HorseBesideUnits = 100.0 AutoReadOnly
 float Property MountHelpSeconds = 2.0 AutoReadOnly
+; mount: the watch looks every MountWatchSeconds. A companion that is not in the saddle and has moved less than
+; MountStuckUnits in a look for MountStuckSeconds is stuck: once, the horse is put beside it and it is told to get
+; on again. If it is stuck again after that, or not up after MountLongestSeconds, mount has failed
+float Property MountWatchSeconds = 1.0 AutoReadOnly
+float Property MountStuckUnits = 25.0 AutoReadOnly
+float Property MountStuckSeconds = 4.0 AutoReadOnly
+float Property MountLongestSeconds = 40.0 AutoReadOnly
 string Property EVENT_MOUNT_HELP = "KI_MCP_Gefaehrte_MountHelp" AutoReadOnly
 ; From interface version 14 on the SKSE plugin tells which horse a character rides (GetMount)
 int Property NativeVersionWithMount = 14 AutoReadOnly
@@ -525,6 +571,16 @@ Quest _horseQuest
 Quest _playerHorseQuest
 Quest _horseCallQuest
 Quest _rideWalkQuest
+Quest _rideTravelQuest
+int _rideWatchNumber = 0
+Faction _horseFaction
+; Whom the horse of the companion belonged to before claim_horse (a character or a faction, or nobody), for giving it back
+ActorBase _horseOwnerBefore
+Faction _horseFactionBefore
+bool _isHorseOwnerKnown = false
+int _dismountNumber = 0
+int _mountNumber = 0
+bool _isDismounting = false
 ; Whom the called horse runs to
 Actor _horseCallTarget
 ; Riding somewhere: what the companion rides to (None = it rides after someone or waits), whom it rides after
@@ -582,6 +638,7 @@ Actor _sayApproachTarget
 Topic _sayApproachTopic
 int _sayApproachMood = -1
 bool _isSayApproachQuiet = false
+int _sayApproachNoise = 0
 string _sayApproachTalk = ""
 int _sayApproachIdleHigh = 0
 int _sayApproachIdleLow = 0
@@ -612,6 +669,8 @@ ObjectReference _walkShownTarget
 ; move: the walk to the marker is one of move (the companion waits where it ends), and how far it was sent
 bool _isMoveWalk = false
 float _moveWantedUnits = 0.0
+; move_to: how far in front of the target the companion was to stop
+float _walkKeepUnits = 0.0
 ; pick_up: the loot walk that is running leads to a thing that lies around, which the companion picks up there.
 ; If that thing is an arrow that was shot, these are the two halves of its ID (both 0 = it is an item like any other)
 bool _isPickUp = false
@@ -681,6 +740,7 @@ EndEvent
 Function OnGameLoaded()
     StartLoop()
     KeepHorseNames()
+    KeepHorseOwner()
 EndFunction
 
 Function StartLoop()
@@ -693,6 +753,8 @@ Function StartLoop()
     RegisterForModEvent(EVENT_SAY_APPROACH, "OnSayApproachRequested")
     RegisterForModEvent(EVENT_FOLLOW_WATCH, "OnFollowWatchRequested")
     RegisterForModEvent(EVENT_MOUNT_HELP, "OnMountHelpRequested")
+    RegisterForModEvent(EVENT_RIDE_WATCH, "OnRideWatchRequested")
+    RegisterForModEvent(EVENT_DISMOUNT_HELP, "OnDismountHelpRequested")
     RegisterForModEvent(EVENT_HORSE_CALL, "OnHorseCallRequested")
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
     ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
@@ -1847,8 +1909,28 @@ int Function RunCommand(int commandHandle, string actionName)
         Actor wantedHorse = GetTargetForm(commandHandle) as Actor
         resultText = GetHorseProblem(wantedHorse, horseText)
         If resultText == ""
+            resultText = GetClaimProblem(companion, wantedHorse)
+        EndIf
+        If resultText == ""
             isOk = true
             resultText = ClaimHorse(companion, wantedHorse)
+        EndIf
+    ElseIf actionName == ACTION_RELEASE_HORSE
+        ; Without a target it is the horse of the companion
+        string releaseText = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, "")
+        Actor releasedHorse = GetClaimedHorse()
+        If releaseText != ""
+            releasedHorse = GetTargetForm(commandHandle) as Actor
+        EndIf
+        If !releasedHorse && releaseText == ""
+            resultText = "You have no horse to give back."
+        ElseIf !releasedHorse
+            resultText = "There is no animal with the ref_id '" + releaseText + "'. Take the ref_id of the horse from STATE."
+        ElseIf releasedHorse != GetClaimedHorse() && releasedHorse.GetActorOwner() != companion.GetActorBase()
+            resultText = releasedHorse.GetDisplayName() + " is not a horse you took with claim_horse."
+        Else
+            isOk = true
+            resultText = ReleaseHorse(companion, releasedHorse)
         EndIf
     ElseIf actionName == ACTION_MOUNT
         ; With a target the companion takes that horse as its own first
@@ -1856,6 +1938,9 @@ int Function RunCommand(int commandHandle, string actionName)
         If mountText != ""
             Actor namedHorse = GetTargetForm(commandHandle) as Actor
             resultText = GetHorseProblem(namedHorse, mountText)
+            If resultText == ""
+                resultText = GetClaimProblem(companion, namedHorse)
+            EndIf
             If resultText == ""
                 ClaimHorse(companion, namedHorse)
             EndIf
@@ -1873,7 +1958,7 @@ int Function RunCommand(int commandHandle, string actionName)
         Else
             isOk = true
             StopRiding(companion)
-            resultText = "You get off your horse. It stays where it is."
+            resultText = "You get off your horse. It stays where it is. If you cannot get off, your next STATE tells you so."
         EndIf
     ElseIf actionName == ACTION_CALL_HORSE
         ; Without a target it is the horse of the companion, and if it has none, the horse of the player
@@ -1975,6 +2060,7 @@ int Function RunCommand(int commandHandle, string actionName)
             string lookNote = StartSayLook(companion, commandHandle)
             companion.Say(sayTopic)
             bool isQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
+            MakeSayNoise(companion, GetSayNoise(commandHandle))
             StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1), isQuiet)
             If IsStandingAround(companion)
                 TurnToSayTarget(companion)
@@ -2287,6 +2373,9 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE
         Return true
     EndIf
+    If actionName == ACTION_RELEASE_HORSE
+        Return true
+    EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
 EndFunction
 
@@ -2372,6 +2461,7 @@ string Function StartMoveTo(Actor companion, ObjectReference target, int keepMet
     EndIf
     stopMarker.MoveTo(target, awayX / apart * keepUnits, awayY / apart * keepUnits, 0.0, false)
     _walkShownTarget = target
+    _walkKeepUnits = keepUnits
     _walkTarget = stopMarker
     StartWalk()
     Return "You walk to " + target.GetDisplayName() + ", stop about " + keepMeters + " meters in front, and wait there. 'follow' brings you back to the player."
@@ -2787,6 +2877,26 @@ Function TurnToSayTarget(Actor companion)
     EndIf
 EndFunction
 
+; say: how much noise the sentence of this command makes for characters that listen for enemies: none in a low
+; voice, more when it is called out
+int Function GetSayNoise(int commandHandle)
+    If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
+        Return 0
+    EndIf
+    If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_LOUD, 0) != 0
+        Return SayNoiseLoud
+    EndIf
+    Return SayNoiseNormal
+EndFunction
+
+; say: the game itself does not let characters hear what someone says. So that speaking can give the companion away,
+; the script tells the game about the noise, as it does for a tripwire
+Function MakeSayNoise(Actor companion, int noise)
+    If noise > 0
+        companion.CreateDetectionEvent(companion, noise)
+    EndIf
+EndFunction
+
 ; say: the look that goes with how the companion speaks (below 0 = none). A look the AI put on with expression stays.
 ; isQuiet: the companion speaks in a low voice, then the look is weaker
 Function StartSayFace(Actor companion, int mood, bool isQuiet = false)
@@ -2894,6 +3004,7 @@ string Function StartSayApproach(Actor companion, int commandHandle, Topic sayTo
     _sayApproachTopic = sayTopic
     _sayApproachMood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1)
     _isSayApproachQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
+    _sayApproachNoise = GetSayNoise(commandHandle)
     _sayApproachTalk = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
     _sayApproachIdleHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
     _sayApproachIdleLow = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0)
@@ -2951,6 +3062,7 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     companion.SetLookAt(target, true)
     _sayLookTarget = target
     companion.Say(_sayApproachTopic)
+    MakeSayNoise(companion, _sayApproachNoise)
     StartSayFace(companion, _sayApproachMood, _isSayApproachQuiet)
     PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
     ; The server's say_end came too early for this sentence, so the end is waited for here.
@@ -3772,7 +3884,7 @@ EndFunction
 ; over to someone to speak, getting on its horse, or riding somewhere. The server lets the next command of a chain
 ; wait until this is over
 bool Function IsBusy()
-    If _walkTarget || _isSayDelayed || _isMounting
+    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting
         Return true
     EndIf
     If !_rideTarget
@@ -3782,7 +3894,8 @@ bool Function IsBusy()
     If !companion || !IsRideWanted()
         Return false
     EndIf
-    Return !_rideTarget.Is3DLoaded() || companion.GetDistance(_rideTarget) > RideArrivedUnits
+    ; The watch over the ride takes the target away when the companion has arrived (see OnRideWatchRequested)
+    Return true
 EndFunction
 
 ; Keeps a text for the AI until the next state goes out
@@ -3973,6 +4086,141 @@ ObjectReference Function GetRideMarker(Actor companion)
     Return _rideMarker
 EndFunction
 
+ReferenceAlias Function GetRideTravelAlias(int aliasId)
+    If !_rideTravelQuest
+        _rideTravelQuest = Game.GetFormFromFile(RideTravelQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_rideTravelQuest
+        Return None
+    EndIf
+    If !_rideTravelQuest.IsRunning()
+        _rideTravelQuest.Start()
+    EndIf
+    Return _rideTravelQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; Ends the ride to a thing or a spot: the companion is taken out of the travel packages
+Function ClearRideTravel()
+    ReferenceAlias travelRider = GetRideTravelAlias(RideTravelAliasRider)
+    ReferenceAlias travelWalker = GetRideTravelAlias(RideTravelAliasWalker)
+    If travelRider
+        travelRider.Clear()
+    EndIf
+    If travelWalker
+        travelWalker.Clear()
+    EndIf
+EndFunction
+
+; Lets the companion ride to a thing or a spot. Returns false if the plugin of the mod has no quest for that (yet)
+bool Function SetRideTravel(Actor companion, ObjectReference destination, bool isSlow)
+    ReferenceAlias travelRider = GetRideTravelAlias(RideTravelAliasRider)
+    ReferenceAlias travelWalker = GetRideTravelAlias(RideTravelAliasWalker)
+    ReferenceAlias travelTarget = GetRideTravelAlias(RideTravelAliasTarget)
+    If !travelRider || !travelWalker || !travelTarget
+        Return false
+    EndIf
+    travelTarget.ForceRefTo(destination)
+    If isSlow
+        travelRider.Clear()
+        travelWalker.ForceRefTo(companion)
+    Else
+        travelWalker.Clear()
+        travelRider.ForceRefTo(companion)
+    EndIf
+    Return true
+EndFunction
+
+; The companion stays where it is, in the saddle. The riding package follows whoever is in the alias "Leader", and
+; only a character can be followed: so its own horse goes in there. The rider is always right at it, and stays put
+Function HoldRide(Actor companion)
+    ClearRideTravel()
+    SetRidePace(companion, None, false)
+    ReferenceAlias leaderAlias = GetHorseAlias(HorseAliasLeader)
+    Actor ownHorse = GetOwnHorse()
+    If leaderAlias && ownHorse
+        leaderAlias.ForceRefTo(ownHorse)
+    EndIf
+    _rideTarget = None
+    _rideLeader = None
+    _isRideHolding = true
+    companion.EvaluatePackage()
+EndFunction
+
+; Raised by DoRideMove while the companion rides to a target. numArg is the number of the ride: a newer ride, getting
+; off or mounting again makes this watch give up. When the companion is close to the target it stops there in the saddle
+Event OnRideWatchRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownWatchNumber = numArg as int
+    float waitedSeconds = 0.0
+    While ownWatchNumber == _rideWatchNumber && _rideTarget
+        Utility.Wait(RideWatchSeconds)
+        waitedSeconds += RideWatchSeconds
+        Actor companion = GetCompanion()
+        If ownWatchNumber != _rideWatchNumber || !_rideTarget || !companion || !IsRideWanted()
+            Return
+        EndIf
+        ; The riding package stops a good way behind a character it follows, a travel package goes right up to a thing
+        float holdUnits = RideHoldUnits
+        If _rideTarget as Actor
+            holdUnits = RideArrivedUnits
+        EndIf
+        If companion.GetDistance(_rideTarget) <= holdUnits
+            HoldRide(companion)
+            Return
+        EndIf
+        If waitedSeconds >= RideWatchLongestSeconds
+            HoldRide(companion)
+            AddFailReport("You did not get to where you wanted to ride. You wait in the saddle where you are now.")
+            Return
+        EndIf
+    EndWhile
+EndEvent
+
+; Raised by StopRiding while the companion still sits. The game does not always let a character get off when it is
+; told to: it stays in the saddle, the more often the longer it rode. So the script looks again and again, tells it
+; again, and resets its mind in between, which gets a follower off that hangs in the saddle. If nothing helps, the AI
+; is told, instead of believing that it got off. numArg is the number of the dismount: mounting again ends this
+Event OnDismountHelpRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownNumber = numArg as int
+    int tryNumber = 0
+    bool isOver = false
+    While !isOver && tryNumber < DismountTryCount
+        Utility.Wait(DismountHelpSeconds)
+        Actor rider = GetCompanion()
+        If ownNumber != _dismountNumber
+            ; A newer dismount or a mount has taken over, and with it the word about being busy
+            Return
+        EndIf
+        If !rider || !rider.IsOnMount()
+            isOver = true
+        Else
+            tryNumber += 1
+            ; Mounting again would have ended this watch. So if the companion is still in the alias that lets it
+            ; ride, taking it out did not hold, and it is taken out again
+            ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
+            If riderAlias && riderAlias.GetActorReference()
+                riderAlias.Clear()
+            EndIf
+            If tryNumber == DismountResetTry
+                rider.ResetAI()
+                Utility.Wait(DismountResetSeconds)
+            EndIf
+            rider.Dismount()
+            rider.EvaluatePackage()
+        EndIf
+    EndWhile
+    If !isOver
+        Utility.Wait(DismountHelpSeconds)
+        Actor stuckRider = GetCompanion()
+        If ownNumber != _dismountNumber
+            Return
+        EndIf
+        If stuckRider && stuckRider.IsOnMount()
+            AddFailReport("You are still in the saddle: you could not get off your horse, although the game mod tried several times. Tell the player. Another mod that lets followers ride may be holding you there.")
+        EndIf
+    EndIf
+    _isDismounting = false
+EndEvent
+
 ; How fast the rider goes: without isSlow the riding package sets the pace (it runs). With it the companion is also
 ; in the alias of the second quest, whose package has no fixed speed
 Function SetRidePace(Actor companion, ObjectReference rideTarget, bool isSlow)
@@ -4028,12 +4276,6 @@ string Function DoRideMove(Actor companion, string actionName, int commandHandle
             EndIf
         EndIf
     ElseIf actionName == ACTION_WAIT
-        rideTarget = GetRideMarker(companion)
-        If !rideTarget
-            Return "The game mod could not mark the spot to wait at."
-        EndIf
-        rideTarget.MoveTo(companion)
-        isSlow = false
         doneText = "You stop here and wait in the saddle. 'follow' makes you ride after the player again, dismount gets you off."
     ElseIf actionName == ACTION_MOVE_TO
         rideTarget = GetTargetForm(commandHandle) as ObjectReference
@@ -4076,12 +4318,38 @@ string Function DoRideMove(Actor companion, string actionName, int commandHandle
     StopFleeing()
     StopGesture(companion)
     SetWaiting(companion, false)
-    _rideTarget = newRideTarget
-    _rideLeader = newRideLeader
-    _isRideHolding = isHolding
-    leaderAlias.ForceRefTo(rideTarget)
-    SetRidePace(companion, rideTarget, isSlow)
-    companion.EvaluatePackage()
+    ; A ride that was going on is over, and so is the watch over it
+    _rideWatchNumber += 1
+    If actionName == ACTION_WAIT
+        HoldRide(companion)
+    ElseIf rideTarget as Actor
+        ; After the player or another character, or to a character: the riding package follows it
+        ClearRideTravel()
+        _rideTarget = newRideTarget
+        _rideLeader = newRideLeader
+        _isRideHolding = isHolding
+        leaderAlias.ForceRefTo(rideTarget)
+        SetRidePace(companion, rideTarget, isSlow)
+        companion.EvaluatePackage()
+    Else
+        ; To a thing or a spot: the riding package cannot follow that, a travel package takes the rider there.
+        ; Behind it the riding package holds the rider where it is, in case the travel package ends
+        If !SetRideTravel(companion, rideTarget, isSlow)
+            Return "The game mod is missing its quest for riding to a spot. The mod has to be built and installed again."
+        EndIf
+        SetRidePace(companion, None, false)
+        Actor ownHorse = GetOwnHorse()
+        If ownHorse
+            leaderAlias.ForceRefTo(ownHorse)
+        EndIf
+        _rideTarget = newRideTarget
+        _rideLeader = None
+        _isRideHolding = true
+        companion.EvaluatePackage()
+    EndIf
+    If _rideTarget
+        SendModEvent(EVENT_RIDE_WATCH, "", _rideWatchNumber as float)
+    EndIf
     _isRideMoveOk = true
     Return doneText
 EndFunction
@@ -4346,18 +4614,145 @@ string Function GetHorseProblem(Actor horse, string horseText)
     Return ""
 EndFunction
 
-; Only call this after the command was checked. The horse belongs to the companion from now on:
-; the game lets a character ride a horse it owns
+; The horse in the alias of the companion, also if it is dead (GetOwnHorse leaves a dead one out)
+Actor Function GetClaimedHorse()
+    ReferenceAlias horseAlias = GetHorseAlias(HorseAliasHorse)
+    If !horseAlias
+        Return None
+    EndIf
+    Return horseAlias.GetActorReference()
+EndFunction
+
+Faction Function GetHorseFaction()
+    If !_horseFaction
+        _horseFaction = Game.GetFormFromFile(HorseFactionFormId, OwnPluginFile) as Faction
+    EndIf
+    Return _horseFaction
+EndFunction
+
+; claim_horse: a horse that belongs to someone else is not taken. For the game that would be a stolen horse
+string Function GetClaimProblem(Actor companion, Actor horse)
+    If horse == GetClaimedHorse()
+        Return ""
+    EndIf
+    Actor player = Game.GetPlayer()
+    ActorBase owner = horse.GetActorOwner()
+    Faction ownerFaction = horse.GetFactionOwner()
+    bool isOfSomeoneElse = false
+    If owner
+        isOfSomeoneElse = owner != player.GetActorBase() && owner != companion.GetActorBase()
+    ElseIf ownerFaction
+        isOfSomeoneElse = !player.IsInFaction(ownerFaction)
+    EndIf
+    If isOfSomeoneElse
+        Return horse.GetDisplayName() + " belongs to someone else, taking it would be stealing. Take a horse of the player's, or one that belongs to nobody."
+    EndIf
+    Return ""
+EndFunction
+
+; Makes the horse belong to the player and the companion together (see HorseFactionFormId). With an older plugin
+; of the mod, which has no such faction, it belongs to the companion alone as before
+Function ShareHorse(Actor companion, Actor horse)
+    Faction horseFaction = GetHorseFaction()
+    If !horseFaction
+        horse.SetActorOwner(companion.GetActorBase())
+        Return
+    EndIf
+    Actor player = Game.GetPlayer()
+    If !player.IsInFaction(horseFaction)
+        player.AddToFaction(horseFaction)
+    EndIf
+    If !companion.IsInFaction(horseFaction)
+        companion.AddToFaction(horseFaction)
+    EndIf
+    horse.SetFactionOwner(horseFaction)
+EndFunction
+
+; After loading: a horse that was taken before the mod had its faction belonged to the companion alone, and the
+; game called it stealing when the player got on. It is shared from now on
+Function KeepHorseOwner()
+    Actor companion = GetCompanion()
+    Actor ownHorse = GetOwnHorse()
+    If companion && ownHorse && GetHorseFaction() && ownHorse.GetActorOwner() == companion.GetActorBase()
+        ShareHorse(companion, ownHorse)
+    EndIf
+EndFunction
+
+; Only call this after the command was checked. The horse belongs to the companion and the player from now on:
+; the game lets a character ride a horse it owns. The horse the companion had before is given back
 string Function ClaimHorse(Actor companion, Actor horse)
+    Actor horseBefore = GetClaimedHorse()
+    If horseBefore == horse
+        ShareHorse(companion, horse)
+        Return horse.GetDisplayName() + " is your horse already. Get on with mount."
+    EndIf
+    string releasedText = ""
+    If horseBefore
+        releasedText = " " + ReleaseHorse(companion, horseBefore)
+    EndIf
     ; A horse is either the companion's or the player's
     ReferenceAlias playerHorseAlias = GetPlayerHorseAlias()
     If playerHorseAlias && playerHorseAlias.GetActorReference() == horse
         playerHorseAlias.Clear()
     EndIf
+    ; Whom it belonged to until now, for release_horse. A horse the companion took before the mod noted that
+    ; belongs to the companion itself, and whose it was before is not known
+    _horseOwnerBefore = horse.GetActorOwner()
+    _horseFactionBefore = horse.GetFactionOwner()
+    _isHorseOwnerKnown = _horseOwnerBefore != companion.GetActorBase()
+    If !_isHorseOwnerKnown
+        _horseOwnerBefore = None
+    EndIf
     GetHorseAlias(HorseAliasHorse).ForceRefTo(horse)
-    horse.SetActorOwner(companion.GetActorBase())
+    ShareHorse(companion, horse)
     horse.EvaluatePackage()
-    Return horse.GetDisplayName() + " is your horse now. Get on with mount. When the player mounts or dismounts, you do the same, unless you switch that off with ride_lock."
+    Return horse.GetDisplayName() + " is your horse now, and the player can still ride it. Get on with mount. When the player mounts or dismounts, you do the same, unless you switch that off with ride_lock. release_horse gives it back." + releasedText
+EndFunction
+
+; release_horse, and claim_horse for the horse the companion had before: the horse is no longer the companion's and
+; belongs to whom it belonged before again. Returns the text for the AI
+string Function ReleaseHorse(Actor companion, Actor horse)
+    string horseName = horse.GetDisplayName()
+    ReferenceAlias horseAlias = GetHorseAlias(HorseAliasHorse)
+    bool isOwnHorse = horseAlias && horseAlias.GetActorReference() == horse
+    Faction playerFaction = Game.GetForm(PlayerFactionFormId) as Faction
+    string ownerText = ""
+    If isOwnHorse
+        If IsRideWanted() || companion.IsOnMount()
+            StopRiding(companion)
+        EndIf
+        ReferenceAlias calledAlias = GetHorseCallAlias(HorseCallAliasHorse)
+        If calledAlias && calledAlias.GetActorReference() == horse
+            EndHorseCall()
+        EndIf
+        horseAlias.Clear()
+    EndIf
+    If isOwnHorse && _isHorseOwnerKnown && _horseOwnerBefore
+        horse.SetActorOwner(_horseOwnerBefore)
+        ownerText = "It belongs to " + _horseOwnerBefore.GetName() + " again."
+    ElseIf isOwnHorse && _isHorseOwnerKnown && _horseFactionBefore
+        horse.SetFactionOwner(_horseFactionBefore)
+        If _horseFactionBefore == playerFaction
+            ownerText = "It belongs to the player again."
+        Else
+            ownerText = "It belongs to whom it belonged before again."
+        EndIf
+    ElseIf isOwnHorse && _isHorseOwnerKnown
+        ownerText = "It belonged to nobody before, so the player and you can still ride it."
+    Else
+        ; Taken before the mod noted whose a horse was: the player gets it, as if it was bought
+        If playerFaction
+            horse.SetFactionOwner(playerFaction)
+        EndIf
+        ownerText = "The game mod had not noted whom it belonged to before, so it belongs to the player now."
+    EndIf
+    If isOwnHorse
+        _isHorseOwnerKnown = false
+        _horseOwnerBefore = None
+        _horseFactionBefore = None
+    EndIf
+    horse.EvaluatePackage()
+    Return horseName + " is not your horse any more. " + ownerText
 EndFunction
 
 ; Returns why the companion cannot mount its horse now, or "" if it can
@@ -4384,6 +4779,8 @@ EndFunction
 ; Only call this after GetRideProblem said that it can be done
 string Function StartRiding(Actor companion)
     Actor ownHorse = GetOwnHorse()
+    ; Another follower than the one that took the horse may ride it now: it has to own it as well
+    ShareHorse(companion, ownHorse)
     ; As for every command that sends the companion somewhere: what it was doing ends, and it follows the player
     TakeFollowAgain()
     EndWalk()
@@ -4405,32 +4802,86 @@ string Function StartRiding(Actor companion)
     _rideTarget = None
     _rideLeader = None
     _isRideHolding = false
+    _rideWatchNumber += 1
+    ; A dismount that was still being watched over is off
+    _dismountNumber += 1
+    _isDismounting = false
+    ClearRideTravel()
     SetRidePace(companion, None, false)
     GetHorseAlias(HorseAliasLeader).ForceRefTo(Game.GetPlayer())
     GetHorseAlias(HorseAliasRider).ForceRefTo(companion)
     ownHorse.EvaluatePackage()
     companion.EvaluatePackage()
     _isMounting = true
-    SendModEvent(EVENT_MOUNT_HELP, "", 0.0)
+    _mountNumber += 1
+    SendModEvent(EVENT_MOUNT_HELP, "", _mountNumber as float)
     Return "You get on " + ownHorse.GetDisplayName() + " and ride after the player. Your next STATE tells you whether you sit on it."
 EndFunction
 
-; Raised by StartRiding. The riding package lets the companion mount on its own. If it has not after a moment,
-; it is told to use the horse, which is what the player does to get on
+; Raised by StartRiding. numArg is the number of the mount: getting off or mounting anew ends this watch.
+; The riding package lets the companion walk to its horse and mount on its own, the horse stays where it is.
+; If the companion is not up after a moment, it is told to use the horse, which is what the player does to get on.
+; If it then stands still without getting on (it hung more than once with the horse a meter away), the horse is
+; put right beside it and it is told again. That is done once, and only for a companion that does not get on:
+; one that is still walking towards its horse is left alone. If that does not help either, the AI is told
 Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form sender)
-    Utility.Wait(MountHelpSeconds)
+    int ownNumber = numArg as int
+    float waitedSeconds = 0.0
+    float stuckSeconds = 0.0
+    bool isToldToUse = false
+    bool isHorseBrought = false
     Actor companion = GetCompanion()
-    Actor ownHorse = GetOwnHorse()
-    If !companion || !ownHorse || !IsRideWanted() || companion.IsOnMount()
-        _isMounting = false
+    If !companion
         Return
     EndIf
-    ownHorse.Activate(companion)
-    Utility.Wait(MountHelpSeconds + MountHelpSeconds)
-    _isMounting = false
-    If IsRideWanted() && !companion.IsOnMount()
-        AddFailReport("You did not get on your horse. Go closer to it, or try mount again.")
-    EndIf
+    float lastX = companion.GetPositionX()
+    float lastY = companion.GetPositionY()
+    While ownNumber == _mountNumber
+        Utility.Wait(MountWatchSeconds)
+        waitedSeconds += MountWatchSeconds
+        If ownNumber != _mountNumber
+            Return
+        EndIf
+        Actor ownHorse = GetOwnHorse()
+        If !ownHorse || !IsRideWanted() || companion.IsOnMount()
+            _isMounting = false
+            Return
+        EndIf
+        float movedX = companion.GetPositionX() - lastX
+        float movedY = companion.GetPositionY() - lastY
+        lastX = companion.GetPositionX()
+        lastY = companion.GetPositionY()
+        If Math.sqrt(movedX * movedX + movedY * movedY) < MountStuckUnits
+            stuckSeconds += MountWatchSeconds
+        Else
+            stuckSeconds = 0.0
+        EndIf
+        If !isToldToUse && waitedSeconds >= MountHelpSeconds
+            isToldToUse = true
+            ; Getting on takes a moment in which the companion stands still: that is not being stuck yet
+            stuckSeconds = 0.0
+            ownHorse.Activate(companion)
+        ElseIf stuckSeconds >= MountStuckSeconds && !isHorseBrought
+            isHorseBrought = true
+            stuckSeconds = 0.0
+            ; The horse is put to the right of the companion, facing the same way, and the companion gets on from there
+            float sideAngle = companion.GetAngleZ() + 90.0
+            ownHorse.MoveTo(companion, HorseBesideUnits * Math.sin(sideAngle), HorseBesideUnits * Math.cos(sideAngle), 0.0, true)
+            ownHorse.EvaluatePackage()
+            companion.EvaluatePackage()
+            Utility.Wait(MountWatchSeconds)
+            If ownNumber != _mountNumber
+                Return
+            EndIf
+            If !companion.IsOnMount()
+                ownHorse.Activate(companion)
+            EndIf
+        ElseIf (stuckSeconds >= MountStuckSeconds && isHorseBrought) || waitedSeconds >= MountLongestSeconds
+            _isMounting = false
+            AddFailReport("You did not get on your horse: you stood beside it and the game did not let you up, also after the horse was put right next to you. Try mount again, or somewhere with more room.")
+            Return
+        EndIf
+    EndWhile
 EndEvent
 
 ; Takes the companion off its horse: out of the alias that lets it ride, and down
@@ -4439,6 +4890,9 @@ Function StopRiding(Actor companion)
     _rideLeader = None
     _isRideHolding = false
     _isMounting = false
+    _mountNumber += 1
+    _rideWatchNumber += 1
+    ClearRideTravel()
     SetRidePace(companion, None, false)
     ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
     If riderAlias
@@ -4452,8 +4906,13 @@ Function StopRiding(Actor companion)
             rider.EvaluatePackage()
         EndIf
     EndIf
+    _dismountNumber += 1
+    _isDismounting = false
     If companion.IsOnMount()
         companion.Dismount()
+        ; Whether it really got off is looked at over the next seconds (see OnDismountHelpRequested)
+        _isDismounting = true
+        SendModEvent(EVENT_DISMOUNT_HELP, "", _dismountNumber as float)
     EndIf
     companion.EvaluatePackage()
 EndFunction
@@ -4804,6 +5263,25 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         ; A newer command has taken over in the meantime, or the watch has started the walk again
         Return
     EndIf
+    ; What became of a walk of move_to or move is told while the walk still counts as going on. The server looks
+    ; every second whether the companion is busy and how often something failed: if the walk were over first, the
+    ; server would start the next command of a chain and then blame that one for the failure
+    If !isLootWalk && !isEnterWalk
+        If !isRoomWalk
+            If !hasArrived && !IsCloseEnough(companion, walkTarget, shownTarget)
+                string walkName = walkTarget.GetDisplayName()
+                float walkDistance = companion.GetDistance(walkTarget)
+                If shownTarget
+                    walkName = shownTarget.GetDisplayName()
+                    walkDistance = companion.GetDistance(shownTarget)
+                EndIf
+                AddFailReport("You did not get to " + walkName + ": you stopped about " + ToMeters(walkDistance) + " meters away from it.")
+                Debug.Notification("AI companion: did not get to " + walkName)
+            EndIf
+        ElseIf _isMoveWalk
+            ReportMoveWalk(companion)
+        EndIf
+    EndIf
     _walkTarget = None
     _walkShownTarget = None
     If isLootWalk
@@ -4820,9 +5298,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         float steppedY = companion.GetPositionY() - _roomStartY
         float steppedUnits = Math.sqrt(steppedX * steppedX + steppedY * steppedY)
         If isMoveWalk
-            If steppedUnits < _moveWantedUnits - MoveShortUnits
-                AddFailReport("You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there.")
-            EndIf
+            ; Told already, before the walk was over (see ReportMoveWalk)
             Return
         EndIf
         If steppedUnits < RoomMovedUnits
@@ -4853,15 +5329,44 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         EndIf
         Return
     EndIf
-    If !hasArrived
-        string walkName = walkTarget.GetDisplayName()
-        If shownTarget
-            walkName = shownTarget.GetDisplayName()
-        EndIf
-        AddFailReport("You did not get to " + walkName + ".")
-        Debug.Notification("AI companion: did not get to " + walkName)
-    EndIf
 EndEvent
+
+; move_to: whether the companion stands close enough to count as arrived, although the game says the walk failed
+bool Function IsCloseEnough(Actor companion, ObjectReference walkTarget, ObjectReference shownTarget)
+    If companion.GetDistance(walkTarget) <= WalkCloseUnits + GetHalfSize(walkTarget)
+        Return true
+    EndIf
+    ; The spot in front of the target was not reached, but the target itself is close
+    If !shownTarget
+        Return false
+    EndIf
+    Return companion.GetDistance(shownTarget) <= WalkCloseUnits + _walkKeepUnits + GetHalfSize(shownTarget)
+EndFunction
+
+; Half of how long or wide a thing or a character is (a horse is longer than a person), 0 for a marker
+float Function GetHalfSize(ObjectReference thing)
+    float size = thing.GetLength()
+    If thing.GetWidth() > size
+        size = thing.GetWidth()
+    EndIf
+    Return size * 0.5
+EndFunction
+
+; move: tells the AI if the companion stopped short of the spot. Most of the way counts as done, less as failed
+Function ReportMoveWalk(Actor companion)
+    float steppedX = companion.GetPositionX() - _roomStartX
+    float steppedY = companion.GetPositionY() - _roomStartY
+    float steppedUnits = Math.sqrt(steppedX * steppedX + steppedY * steppedY)
+    If steppedUnits >= _moveWantedUnits - MoveShortUnits
+        Return
+    EndIf
+    string shortText = "You only got about " + ToMeters(steppedUnits) + " of the " + ToMeters(_moveWantedUnits) + " meters you wanted to walk: something is in the way there."
+    If steppedUnits >= _moveWantedUnits * MoveEnoughPart
+        AddReport(shortText)
+    Else
+        AddFailReport(shortText)
+    EndIf
+EndFunction
 
 ; Raised together with the walk. In the game a walk sometimes never started: the companion stood still,
 ; and the call in OnWalkRequested never came back, so the state said "walking to" for good.

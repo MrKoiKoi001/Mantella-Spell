@@ -1,0 +1,29 @@
+FormKey: 000815:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_RideTravelQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 112
+NextAliasID: 3
+Aliases:
+- Name: TravelRider
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000816:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: TravelTarget
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null
+- ID: 2
+  Name: TravelWalker
+  Flags:
+  - Optional
+  - AllowReserved
+  PackageData:
+  - 000817:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
