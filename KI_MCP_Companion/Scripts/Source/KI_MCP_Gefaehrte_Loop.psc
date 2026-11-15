@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 11 AutoReadOnly
+int Property ProtocolNumber = 12 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -574,6 +574,42 @@ int Property SneakModeOn = 1 AutoReadOnly
 int Property SneakModeOff = 2 AutoReadOnly
 ; sneak: how long after the command the script looks whether the companion crouches or stands as it was told
 float Property SneakCheckSeconds = 0.6 AutoReadOnly
+; From interface version 18 on the SKSE plugin can force a character into or out of sneaking (SetForceSneak), let it
+; cast the spell in its right hand the way the game does (StartHandCast, EndHandCast, GetHandCastState), and list
+; an inventory in one go (GetInventoryLines)
+int Property NativeVersionWithActions = 18 AutoReadOnly
+; From interface version 19 on the SKSE plugin can say whom a character looks at while it speaks (SetTalkTarget).
+; The game puts the player there for every line spoken with Actor.Say, and that comes before what Actor.SetLookAt sets
+int Property NativeVersionWithTalkTarget = 19 AutoReadOnly
+; say to someone other than the player without stopping for it (the companion walks, follows someone, fights or
+; sits): own event that keeps the eyes on that character for the length of the sentence, and how long that is
+; taken to be if the server did not tell
+string Property EVENT_SAY_LOOK = "KI_MCP_Gefaehrte_SayLook" AutoReadOnly
+float Property SayLookDefaultSeconds = 4.0 AutoReadOnly
+; sneak: the key the player sneaks with, as SKSE names it. When it is pressed the script looks at once whether the
+; companion still does what it was told, and SneakControlSeconds later the game knows that the player sneaks
+string Property SneakControl = "Sneak" AutoReadOnly
+float Property SneakControlSeconds = 0.2 AutoReadOnly
+; cast_spell: a spell that is held (flames, healing hands) runs this long, unless the server names other seconds
+; (KEY_COMMAND_SECONDS, at most CastHoldLongestSeconds). MagicEffect.GetCastingType of SKSE tells such a spell
+string Property KEY_COMMAND_SECONDS = "companion_seconds" AutoReadOnly
+float Property CastHoldSeconds = 3.0 AutoReadOnly
+float Property CastHoldLongestSeconds = 15.0 AutoReadOnly
+int Property CastingTypeConcentration = 2 AutoReadOnly
+; cast_spell by hand: how long the companion gets to raise its hands, how long after that the spell is ready,
+; how long the script waits for the hand to begin, how often it looks, how much longer than its charge time a spell
+; is charged, and how long the hand gets to let the spell fly before it is emptied again
+float Property CastDrawSeconds = 2.0 AutoReadOnly
+float Property CastReadySeconds = 0.4 AutoReadOnly
+float Property CastStartSeconds = 1.2 AutoReadOnly
+float Property CastCheckSeconds = 0.2 AutoReadOnly
+float Property CastChargeExtraSeconds = 0.3 AutoReadOnly
+float Property CastReleaseSeconds = 1.0 AutoReadOnly
+string Property EVENT_CAST = "KI_MCP_Gefaehrte_Cast" AutoReadOnly
+; What GetInventoryLines of the plugin lists: everything, the favorites, or what is worn and held
+int Property InventoryFilterAll = 0 AutoReadOnly
+int Property InventoryFilterFavorites = 1 AutoReadOnly
+int Property InventoryFilterEquipped = 2 AutoReadOnly
 ; loot: at the body the companion kneels down ("IdleSearchBody" of the game), at a container it goes through it
 ; ("IdleSearchingChest"). It takes the things LootKneelSeconds later, while it is down, stays LootAfterSeconds
 ; and gets up again ("IdleKneelingExit" and "IdleSearchChestExit", whose event is KneelExitEvent). After
@@ -601,6 +637,11 @@ int Property TakeIdleFormId = 0x000B5E1F AutoReadOnly
 string Property TakeEvent = "IdleTake" AutoReadOnly
 float Property HandOverSeconds = 0.6 AutoReadOnly
 float Property HandOverUnits = 300.0 AutoReadOnly
+; give and take with several items in one command: a list of numbers, ValuesPerHandOver per item: the two halves of
+; its ID and how many (0 = all of them). The answer names at most HandOverNamedCount of the items
+string Property KEY_COMMAND_ITEMS = "companion_items" AutoReadOnly
+int Property ValuesPerHandOver = 3 AutoReadOnly
+int Property HandOverNamedCount = 15 AutoReadOnly
 ; Reading: a spell tome (equip) is read for TomeReadSeconds before the companion knows its spell, and a book the
 ; AI reads (STATE with read) is held open if the companion carries it. Standing "IdleBook_Reading", on a chair
 ; "IdleBookSitting_Reading"
@@ -742,6 +783,8 @@ int _sayApproachIdleHigh = 0
 int _sayApproachIdleLow = 0
 int _sayApproachMs = 0
 bool _isSayApproachFollowing = false
+; say: how long the sentence is whose look OnSayLookRequested keeps (in milliseconds, 0 = not known)
+int _sayLookMs = 0
 ; run: whether the walk that was just started is to be run, why the companion is in the lead quest for running
 ; (see RunModeNone), and the number of the watch over following that counts (an older one ends itself)
 bool _isRunWanted = false
@@ -827,8 +870,23 @@ bool _keepsWeaponAway = false
 ; Kept from one report_state to the next, and in the save, so that it also holds right after loading
 bool _isMuteWanted = false
 float _drawWithPlayerUnits = 0.0
-; sneak: whether the companion sneaks as the player does (SneakModeAuto), always or never
+; sneak: whether the companion sneaks as the player does (SneakModeAuto), always or never. While it is to do
+; something else than the player does, it is taken out of being the player's teammate (see UpdateSneak), and
+; _sneakActor is the companion that was done to
 int _sneakMode = 0
+bool _isTeammateCleared = false
+Actor _sneakActor
+; cast_spell: the companion is casting (see OnCastRequested), the number of that cast, what it casts on whom,
+; for how long it holds the spell (0 = it is not a spell that is held), and whether it casts with its hand
+bool _isCasting = false
+int _castNumber = 0
+Spell _castSpell
+ObjectReference _castTarget
+float _castHoldSeconds = 0.0
+bool _isCastByHand = false
+bool _isCastOk = false
+; give and take with several items: whether anything changed hands
+bool _isHandOverOk = false
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
 ; It still counts as busy, so that the next command of a chain waits until it stands again
 bool _isLooting = false
@@ -850,6 +908,7 @@ Function OnGameLoaded()
     StartLoop()
     KeepHorseNames()
     KeepHorseOwner()
+    KeepSneakMode()
 EndFunction
 
 Function StartLoop()
@@ -866,6 +925,10 @@ Function StartLoop()
     RegisterForModEvent(EVENT_RIDE_WATCH, "OnRideWatchRequested")
     RegisterForModEvent(EVENT_DISMOUNT_HELP, "OnDismountHelpRequested")
     RegisterForModEvent(EVENT_HORSE_CALL, "OnHorseCallRequested")
+    RegisterForModEvent(EVENT_CAST, "OnCastRequested")
+    RegisterForModEvent(EVENT_SAY_LOOK, "OnSayLookRequested")
+    RegisterForControl(SneakControl)
+    _isCasting = false
     ; The game does not keep a changed "Confidence" in a save, so a retreat ends with loading. So does a walk.
     ; A seat stays: the game keeps who is in the aliases of the sit quest, so the companion still sits after loading
     StopFleeing()
@@ -1629,6 +1692,9 @@ Function AddSpellsToState(int stateHandle, Actor companion)
 EndFunction
 
 Function AddInventoryToState(int stateHandle, ObjectReference owner, string keyName)
+    If AddInventoryLines(stateHandle, owner, keyName, InventoryFilterAll)
+        Return
+    EndIf
     ; Only a character can wear or hold something
     Actor ownerActor = owner as Actor
     bool isPlayerInventory = owner == Game.GetPlayer()
@@ -1761,7 +1827,36 @@ EndFunction
 ; The inventory of the player or of the companion for the state, the whole of it or only a part (see
 ; KEY_COMMAND_INVENTORY_FILTER). The favorites of the player can only be found by going through everything,
 ; so there the whole inventory is sent and the server picks them out
+; An inventory as the SKSE plugin lists it, in one go: one text per item under keyName + "_lines" (see
+; KI_MCP_Gefaehrte_Native.psc). The script itself has to ask the game several questions per item, which took longer
+; than the server waits for the inventory of a player who carries a lot. Returns false if the plugin is too old
+bool Function AddInventoryLines(int stateHandle, ObjectReference owner, string keyName, int filterNumber)
+    If _nativeVersion < NativeVersionWithActions
+        Return false
+    EndIf
+    ; The favorites of the companion are the script's own list. The plugin knows those of the player itself
+    Form[] marked = _favoriteItems
+    If owner != _favoriteOwner || marked.Length == 0
+        marked = Utility.CreateFormArray(1)
+    EndIf
+    string[] itemLines = KI_MCP_Gefaehrte_Native.GetInventoryLines(owner, filterNumber, MaxInventoryItems, marked)
+    If itemLines.Length == 0
+        Return false
+    EndIf
+    SKSE_HTTP.setStringArray(stateHandle, keyName + "_lines", itemLines)
+    Return true
+EndFunction
+
 Function AddWantedInventory(int stateHandle, Actor owner, string keyName, string filter)
+    int filterNumber = InventoryFilterAll
+    If filter == FILTER_EQUIPPED
+        filterNumber = InventoryFilterEquipped
+    ElseIf filter == FILTER_FAVORITES
+        filterNumber = InventoryFilterFavorites
+    EndIf
+    If AddInventoryLines(stateHandle, owner, keyName, filterNumber)
+        Return
+    EndIf
     If filter == FILTER_EQUIPPED
         AddItemsToState(stateHandle, owner, keyName, GetEquippedForms(owner))
     ElseIf filter == FILTER_FAVORITES && owner != Game.GetPlayer()
@@ -2055,6 +2150,11 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
+    ; give and take with several items carry them as a list of numbers (see KEY_COMMAND_ITEMS)
+    int[] handOverValues
+    If actionName == ACTION_GIVE || actionName == ACTION_TAKE
+        handOverValues = SKSE_HTTP.getIntArray(commandHandle, KEY_COMMAND_ITEMS)
+    EndIf
     If !IsKnownAction(actionName)
         resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, equip, unequip, give and take."
     ElseIf !companion
@@ -2200,15 +2300,16 @@ int Function RunCommand(int commandHandle, string actionName)
             resultText = "There is nobody with the ref_id '" + spellTargetText + "' to cast it on. Take the ref_id from STATE, or leave the target out."
         ElseIf spellTarget && !spellTarget.Is3DLoaded()
             resultText = spellTarget.GetDisplayName() + " is too far away to cast a spell on."
+        ElseIf _isCasting
+            resultText = "You are still casting. Wait until that is over."
         Else
-            isOk = true
-            wantedSpell.Cast(companion, spellTarget)
-            If spellTarget
-                resultText = "You cast " + wantedSpell.GetName() + " on " + spellTarget.GetDisplayName() + "."
-            Else
-                resultText = "You cast " + wantedSpell.GetName() + "."
-            EndIf
+            resultText = StartCasting(companion, wantedSpell, spellTarget, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SECONDS, 0))
+            isOk = _isCastOk
         EndIf
+    ElseIf handOverValues.Length >= ValuesPerHandOver
+        ; give or take with several items in one go
+        resultText = DoHandOver(companion, actionName, handOverValues)
+        isOk = _isHandOverOk
     ElseIf IsItemAction(actionName)
         ; What the companion does with its things changes nothing about where it walks or whom it fights
         Form item = GetTargetForm(commandHandle)
@@ -2258,6 +2359,11 @@ int Function RunCommand(int commandHandle, string actionName)
             ; if the companion really stands around: finding that out takes a moment (see IsStandingAround)
             string lookNote = StartSayLook(companion, commandHandle)
             companion.Say(sayTopic)
+            ; To someone other than the player: the eyes are kept there for the whole sentence (see OnSayLookRequested)
+            If _sayLookTarget && _sayLookTarget != Game.GetPlayer()
+                _sayLookMs = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_SAY_MS, 0)
+                SendModEvent(EVENT_SAY_LOOK, "", _sayNumber as float)
+            EndIf
             bool isQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
             MakeSayNoise(companion, GetSayNoise(commandHandle))
             StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1), isQuiet)
@@ -2689,6 +2795,171 @@ Form Function GetFormFromHalves(int highHalf, int lowHalf)
     Return Game.GetFormEx(formId)
 EndFunction
 
+; ----------------------------------------------------------------- cast_spell
+; A spell cast by a script (Spell.Cast) works at once: no movement, it comes out of the head of the character, and a
+; spell that is held (flames) ran on for about seven seconds. So the companion casts like the game makes characters
+; cast: it takes the spell into its right hand, raises its hands, and the SKSE plugin makes it do with that hand what
+; the attack button does for the player. That costs magicka as it does for the player. Afterwards it holds again what
+; it held before. All of that takes seconds, so the command only starts it (OnCastRequested).
+; With an older plugin, in the saddle and on a seat the spell is cast the plain way, but a held one only as long as asked
+
+; Whether the spell is one that is held as long as the hand stays up
+bool Function IsHeldSpell(Spell candidate)
+    MagicEffect mainEffect = candidate.GetNthEffectMagicEffect(candidate.GetCostliestEffectIndex())
+    Return mainEffect && mainEffect.GetCastingType() == CastingTypeConcentration
+EndFunction
+
+; Starts the cast and returns the text for the AI. _isCastOk tells whether it was started.
+; wantedSeconds: how long to hold a spell that is held (0 = CastHoldSeconds)
+string Function StartCasting(Actor companion, Spell wantedSpell, ObjectReference spellTarget, int wantedSeconds)
+    _isCastOk = false
+    string spellName = wantedSpell.GetName()
+    float holdSeconds = 0.0
+    If IsHeldSpell(wantedSpell)
+        holdSeconds = CastHoldSeconds
+        If wantedSeconds > 0
+            holdSeconds = wantedSeconds as float
+        EndIf
+        If holdSeconds > CastHoldLongestSeconds
+            holdSeconds = CastHoldLongestSeconds
+        EndIf
+    EndIf
+    bool isByHand = _nativeVersion >= NativeVersionWithActions && companion.Is3DLoaded() && !companion.IsOnMount() && companion.GetSitState() == 0 && !companion.IsSwimming()
+    If isByHand
+        ; Cast by hand the spell costs what it costs the player. For a spell that is held that is the cost per second
+        int cost = wantedSpell.GetEffectiveMagickaCost(companion)
+        int magicka = companion.GetActorValue("Magicka") as int
+        If magicka < cost
+            Return "You do not have the magicka for " + spellName + ": it costs " + cost + ", you have " + magicka + ". It comes back by itself in a while."
+        EndIf
+    EndIf
+    _isCastOk = true
+    _castNumber += 1
+    _isCasting = true
+    _castSpell = wantedSpell
+    _castTarget = spellTarget
+    _castHoldSeconds = holdSeconds
+    _isCastByHand = isByHand
+    SendModEvent(EVENT_CAST, "", _castNumber as float)
+    string castText = "You cast " + spellName
+    If spellTarget
+        castText = castText + " on " + spellTarget.GetDisplayName()
+    EndIf
+    castText = castText + "."
+    If holdSeconds > 0.0
+        castText = castText + " You hold it for about " + (holdSeconds as int) + " seconds."
+    EndIf
+    If isByHand
+        Return castText + " You take it into your right hand for that and hold again what you held before afterwards. It costs you magicka."
+    EndIf
+    Return castText + " Without the movement of the hand: that needs you on your feet and the newest plugin of the game mod."
+EndFunction
+
+; Raised by StartCasting. numArg is the number of the cast
+Event OnCastRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownCastNumber = numArg as int
+    If ownCastNumber != _castNumber
+        Return
+    EndIf
+    Actor companion = GetCompanion()
+    Spell castSpell = _castSpell
+    ObjectReference castTarget = _castTarget
+    float holdSeconds = _castHoldSeconds
+    If companion && castSpell
+        bool isDone = false
+        If _isCastByHand
+            isDone = CastByHand(companion, castSpell, castTarget, holdSeconds)
+            If !isDone
+                AddReport("The game did not let you cast " + castSpell.GetName() + " with your hand, so you cast it the plain way, without the movement.")
+            EndIf
+        EndIf
+        If !isDone
+            castSpell.Cast(companion, castTarget)
+            If holdSeconds > 0.0
+                Utility.Wait(holdSeconds)
+                companion.InterruptCast()
+            EndIf
+        EndIf
+    EndIf
+    If ownCastNumber == _castNumber
+        _castSpell = None
+        _castTarget = None
+        _isCasting = false
+    EndIf
+EndEvent
+
+; The companion takes the spell into its right hand, raises its hands, casts and puts back what it held.
+; Returns false if the hand did not begin to cast: then nothing was cast
+bool Function CastByHand(Actor companion, Spell castSpell, ObjectReference castTarget, float holdSeconds)
+    bool wasDrawn = companion.IsWeaponDrawn()
+    Form rightBefore = companion.GetEquippedObject(HandRight)
+    Form leftBefore = companion.GetEquippedObject(HandLeft)
+    ; The spell flies where the companion faces
+    If castTarget && castTarget != companion && castTarget.Is3DLoaded() && IsHoldingStill(companion)
+        TurnTo(companion, companion.GetAngleZ() + companion.GetHeadingAngle(castTarget))
+    EndIf
+    companion.EquipSpell(castSpell, HandRight)
+    If !wasDrawn
+        companion.DrawWeapon()
+    EndIf
+    float waited = 0.0
+    While !companion.IsWeaponDrawn() && waited < CastDrawSeconds
+        Utility.Wait(CastCheckSeconds)
+        waited += CastCheckSeconds
+    EndWhile
+    Utility.Wait(CastReadySeconds)
+    bool isStarted = false
+    int stateBefore = KI_MCP_Gefaehrte_Native.GetHandCastState(companion)
+    If companion.GetEquippedSpell(HandRight) == castSpell && KI_MCP_Gefaehrte_Native.StartHandCast(companion, castTarget)
+        ; The plugin hands the cast to the game, which begins it a moment later. Whether it did shows at the hand
+        waited = 0.0
+        While !isStarted && waited < CastStartSeconds
+            Utility.Wait(CastCheckSeconds)
+            waited += CastCheckSeconds
+            isStarted = KI_MCP_Gefaehrte_Native.GetHandCastState(companion) != stateBefore
+        EndWhile
+    EndIf
+    If isStarted
+        If holdSeconds > 0.0
+            Utility.Wait(holdSeconds)
+        Else
+            Utility.Wait(castSpell.GetCastTime() + CastChargeExtraSeconds)
+        EndIf
+        KI_MCP_Gefaehrte_Native.EndHandCast(companion)
+        If holdSeconds > 0.0
+            ; A spell that is held must not run on if the game missed that the hand let go
+            Utility.Wait(CastCheckSeconds)
+            companion.InterruptCast()
+        Else
+            Utility.Wait(CastReleaseSeconds)
+        EndIf
+    EndIf
+    ; Back into the hands what was there before
+    If rightBefore != castSpell
+        Spell rightSpell = rightBefore as Spell
+        If rightSpell
+            companion.EquipSpell(rightSpell, HandRight)
+        Else
+            companion.UnequipSpell(castSpell, HandRight)
+            If rightBefore
+                companion.EquipItem(rightBefore, false, true)
+            EndIf
+        EndIf
+    EndIf
+    If leftBefore && companion.GetEquippedObject(HandLeft) != leftBefore
+        Spell leftSpell = leftBefore as Spell
+        If leftSpell
+            companion.EquipSpell(leftSpell, HandLeft)
+        Else
+            companion.EquipItem(leftBefore, false, true)
+        EndIf
+    EndIf
+    If !wasDrawn && !companion.IsInCombat()
+        companion.SheatheWeapon()
+    EndIf
+    Return isStarted
+EndFunction
+
 ; ---------------------------------------------------------------------- items
 ; equip, unequip, give and take. The target is the ID of an item as the inventory in the state lists it
 
@@ -2774,18 +3045,7 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
     If wantedCount > 0 && wantedCount < count
         count = wantedCount
     EndIf
-    ; The companion holds its hand out, if it stands next to the player and has its hands free
-    If CanPlayTaskAnimation(companion) && IsHoldingStill(companion) && companion.GetDistance(player) <= HandOverUnits
-        string handOverWay = ""
-        If actionName == ACTION_TAKE
-            handOverWay = PlayGesture(companion, Game.GetForm(TakeIdleFormId) as Idle, TakeEvent)
-        Else
-            handOverWay = PlayGesture(companion, Game.GetForm(GiveIdleFormId) as Idle, GiveEvent)
-        EndIf
-        If handOverWay != ""
-            Utility.Wait(HandOverSeconds)
-        EndIf
-    EndIf
+    PlayHandOverAnimation(companion, actionName, player)
     ; What the script moves itself is no news for the events of the plugin
     If _nativeVersion >= NativeVersionWithEvents
         KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
@@ -2798,6 +3058,95 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
         Return "You take " + count + " " + itemName + " from the player."
     EndIf
     Return "You give " + count + " " + itemName + " to the player."
+EndFunction
+
+; give and take: the companion holds its hand out, if it stands next to the player and has its hands free
+Function PlayHandOverAnimation(Actor companion, string actionName, Actor player)
+    If !CanPlayTaskAnimation(companion) || !IsHoldingStill(companion) || companion.GetDistance(player) > HandOverUnits
+        Return
+    EndIf
+    string handOverWay = ""
+    If actionName == ACTION_TAKE
+        handOverWay = PlayGesture(companion, Game.GetForm(TakeIdleFormId) as Idle, TakeEvent)
+    Else
+        handOverWay = PlayGesture(companion, Game.GetForm(GiveIdleFormId) as Idle, GiveEvent)
+    EndIf
+    If handOverWay != ""
+        Utility.Wait(HandOverSeconds)
+    EndIf
+EndFunction
+
+; Adds a text to a list of texts with commas between them
+string Function AddToList(string listText, string entry)
+    If listText == ""
+        Return entry
+    EndIf
+    Return listText + ", " + entry
+EndFunction
+
+; give and take with several items in one command: one movement of the hand, then every item changes hands.
+; handOverValues: ValuesPerHandOver numbers per item (see KEY_COMMAND_ITEMS). Returns the text for the AI, which
+; names what changed hands and what did not. _isHandOverOk tells whether anything did
+string Function DoHandOver(Actor companion, string actionName, int[] handOverValues)
+    _isHandOverOk = false
+    Actor player = Game.GetPlayer()
+    Actor giver = companion
+    Actor receiver = player
+    If actionName == ACTION_TAKE
+        giver = player
+        receiver = companion
+    EndIf
+    PlayHandOverAnimation(companion, actionName, player)
+    ; What the script moves itself is no news for the events of the plugin
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
+    EndIf
+    string doneText = ""
+    string failedText = ""
+    int doneKinds = 0
+    int place = 0
+    int index = 0
+    While index + ValuesPerHandOver <= handOverValues.Length
+        place += 1
+        Form item = GetFormFromHalves(handOverValues[index], handOverValues[index + 1])
+        int wantedCount = handOverValues[index + 2]
+        If !item || (item as ObjectReference)
+            failedText = AddToList(failedText, "number " + place + " of your list (no such item)")
+        Else
+            int count = giver.GetItemCount(item)
+            If count <= 0
+                failedText = AddToList(failedText, item.GetName() + " (none there)")
+            Else
+                If wantedCount > 0 && wantedCount < count
+                    count = wantedCount
+                EndIf
+                ; The "true" keeps the game from showing a message
+                giver.RemoveItem(item, count, true, receiver)
+                doneKinds += 1
+                If doneKinds <= HandOverNamedCount
+                    doneText = AddToList(doneText, count + " " + item.GetName())
+                EndIf
+            EndIf
+        EndIf
+        index += ValuesPerHandOver
+    EndWhile
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(false)
+    EndIf
+    _isHandOverOk = doneKinds > 0
+    If doneKinds > HandOverNamedCount
+        doneText = doneText + " and " + (doneKinds - HandOverNamedCount) + " more kinds of items"
+    EndIf
+    string handOverText = "Nothing changed hands."
+    If doneKinds > 0 && actionName == ACTION_TAKE
+        handOverText = "You take from the player: " + doneText + "."
+    ElseIf doneKinds > 0
+        handOverText = "You give the player: " + doneText + "."
+    EndIf
+    If failedText != ""
+        handOverText = handOverText + " Not handed over: " + failedText + "."
+    EndIf
+    Return handOverText
 EndFunction
 
 ; --------------------------------------------------------------- favorites
@@ -2992,8 +3341,11 @@ string Function DoLookAt(Actor companion, ObjectReference target)
     ; From here on the AI says where the eyes go, so the end of a sentence must not move them any more
     _sayLookTarget = None
     If !target
-        companion.ClearLookAt()
         _lookTarget = None
+        RestoreLook(companion)
+        If _hasLeader && _leader
+            Return "You keep your eyes on " + _leader.GetDisplayName() + " again, whom you follow."
+        EndIf
         Return "You look where you like again."
     EndIf
     companion.SetLookAt(target)
@@ -3287,6 +3639,7 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     companion.SetLookAt(target, true)
     _sayLookTarget = target
     companion.Say(_sayApproachTopic)
+    HoldTalkLook(companion, target)
     MakeSayNoise(companion, _sayApproachNoise)
     StartSayFace(companion, _sayApproachMood, _isSayApproachQuiet)
     PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
@@ -3298,6 +3651,9 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     While spokenSeconds < sentenceSeconds && ownNumber == _sayNumber
         Utility.Wait(SayFaceCheckSeconds)
         spokenSeconds += SayFaceCheckSeconds
+        If ownNumber == _sayNumber
+            HoldTalkLook(companion, target)
+        EndIf
         If ownNumber == _sayNumber && !_walkTarget && !companion.IsInCombat() && companion.GetSitState() == 0
             angle = companion.GetHeadingAngle(target)
             If angle > SayTurnDegrees || angle < -SayTurnDegrees
@@ -3321,11 +3677,8 @@ EndEvent
 Function ReleaseSay(Actor companion)
     If _sayLookTarget
         _sayLookTarget = None
-        If _lookTarget
-            companion.SetLookAt(_lookTarget)
-        Else
-            companion.ClearLookAt()
-        EndIf
+        HoldTalkLook(companion, None)
+        RestoreLook(companion)
     EndIf
     If _isSayFaceSet
         _isSayFaceSet = false
@@ -3338,6 +3691,58 @@ Function ReleaseSay(Actor companion)
         EndIf
     EndIf
 EndFunction
+
+; Where the eyes of the companion go when nothing special holds them: to what look_at holds, else to whom it
+; follows because of follow with a target, else wherever the game lets it look
+Function RestoreLook(Actor companion)
+    If _lookTarget
+        companion.SetLookAt(_lookTarget)
+    ElseIf _hasLeader && _leader
+        companion.SetLookAt(_leader)
+    Else
+        companion.ClearLookAt()
+    EndIf
+EndFunction
+
+; say: tells the game whom the companion looks at while it speaks (None = nobody in particular any more). Without
+; this the game makes a character that speaks look at the player, whatever SetLookAt says. Needs the newer plugin
+Function HoldTalkLook(Actor companion, ObjectReference talkTarget)
+    If _nativeVersion >= NativeVersionWithTalkTarget
+        KI_MCP_Gefaehrte_Native.SetTalkTarget(companion, talkTarget)
+    EndIf
+EndFunction
+
+; Raised by say to someone other than the player, if the companion does not stop for it. numArg is the number of
+; the sentence. For the length of the sentence the eyes are kept on whom it speaks to: the game only puts the
+; player in their place once the line really starts, which is a moment after the script told it to speak.
+; A companion that stands also turns its body there
+Event OnSayLookRequested(string eventName, string strArg, float numArg, Form sender)
+    int ownNumber = numArg as int
+    Actor companion = GetCompanion()
+    ObjectReference talkTarget = _sayLookTarget
+    If !companion || !talkTarget || ownNumber != _sayNumber
+        Return
+    EndIf
+    float sentenceSeconds = SayLookDefaultSeconds
+    If _sayLookMs > 0
+        sentenceSeconds = (_sayLookMs as float) / 1000.0 + SayEndExtraSeconds
+    EndIf
+    float spokenSeconds = 0.0
+    While spokenSeconds < sentenceSeconds && ownNumber == _sayNumber && _sayLookTarget == talkTarget
+        HoldTalkLook(companion, talkTarget)
+        If !_walkTarget && !_hasLeader && !companion.IsInCombat() && companion.GetSitState() == 0 && !companion.IsOnMount()
+            If companion.GetAnimationVariableFloat(SpeedVariable) < StandingSpeedLimit
+                float angle = companion.GetHeadingAngle(talkTarget)
+                If angle > SayTurnDegrees || angle < -SayTurnDegrees
+                    companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+                    companion.SetLookAt(talkTarget)
+                EndIf
+            EndIf
+        EndIf
+        Utility.Wait(SayFaceCheckSeconds)
+        spokenSeconds += SayFaceCheckSeconds
+    EndWhile
+EndEvent
 
 ; One of the two lines the companion can speak for say: line 2 is the second one, every other number the first
 Topic Function GetSayTopic(int lineNumber)
@@ -3632,7 +4037,11 @@ string Function StartFollowingLeader(Actor companion, Actor leader)
     companion.EvaluatePackage()
     _leader = leader
     _hasLeader = true
-    Return "You follow " + leader.GetDisplayName() + " now, wherever that character goes. 'follow' without a target brings you back to the player."
+    ; The companion keeps its eyes on whom it follows, unless look_at holds them or a sentence does at the moment
+    If !_sayLookTarget
+        RestoreLook(companion)
+    EndIf
+    Return "You follow " + leader.GetDisplayName() + " now, wherever that character goes, and keep your eyes on them. 'follow' without a target brings you back to the player."
 EndFunction
 
 ; Empties the aliases of that quest. Whoever was the walker loses the package
@@ -3652,6 +4061,10 @@ Function StopFollowingLeader()
     leaderAlias.Clear()
     If walker
         walker.EvaluatePackage()
+        ; The eyes are free again, or back on what look_at holds. A sentence that is being spoken ends its look itself
+        If !_sayLookTarget
+            RestoreLook(walker)
+        EndIf
     EndIf
 EndFunction
 
@@ -4294,7 +4707,7 @@ EndFunction
 ; over to someone to speak, getting on its horse, or riding somewhere. The server lets the next command of a chain
 ; wait until this is over
 bool Function IsBusy()
-    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting || _isTurning || _isLooting
+    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting || _isTurning || _isLooting || _isCasting
         Return true
     EndIf
     If !_rideTarget
@@ -5614,7 +6027,7 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             CheckRideWithPlayer()
             CheckCatchUp()
             CheckFavoriteGear(GetCompanion())
-            CheckSneak(GetCompanion())
+            UpdateSneak(GetCompanion())
             ; The plugin learns who the companion is, and keeps what has no event of the game (see TickEvents)
             If _nativeVersion >= NativeVersionWithEvents
                 KI_MCP_Gefaehrte_Native.TickEvents(GetCompanion())
@@ -5624,47 +6037,105 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
 EndEvent
 
 ; ---------------------------------------------------------------------- sneak
-; The game makes a follower sneak whenever the player sneaks, and stand up when the player does. sneak with on or off
-; takes the companion out of that: it sneaks, or walks upright, whatever the player does. The game has one call for
-; both ways (Actor.StartSneaking switches), so the script only calls it when the companion is not as it should be.
-; The follow watch looks once a second, because the game puts a follower back in line with the player
+; The game makes a follower sneak exactly when the player sneaks: that comes with being the player's "teammate"
+; (Actor.SetPlayerTeammate), and it overrules a script within a moment. In the game a companion that was told to
+; sneak or to stand up by the switch of the game (Actor.StartSneaking) again and again twitched up and down once a
+; second, both ways. So nothing is repeated any more:
+; - While the player does what the companion is to do anyway, the companion stays a teammate and the game does the rest.
+; - While the player does something else, the companion is taken out of being a teammate, so that the game stops
+;   putting it in line with the player, and it is forced into or out of sneaking once: with the console command
+;   SetForceSneak through the SKSE plugin, or with the switch of the game if the plugin is too old.
+; The follow watch looks once a second whether the player has changed, and so does the key the player sneaks with.
+; While it is no teammate the companion does not draw its weapon with the player, and what it does wrong is not the
+; player's crime. It still follows and fights as before: that comes from the follower quest of the game
 
-; Makes the companion sneak or stand up, if it is not so already. Returns false if it cannot be told at the moment:
-; not while it fights, rides, sits or swims, and not far away
-bool Function ApplySneak(Actor companion, bool shouldSneak)
-    If companion.IsSneaking() == shouldSneak
-        Return true
+; Forces the companion into or out of sneaking, once
+Function ForceSneak(Actor companion, bool shouldSneak)
+    If _nativeVersion >= NativeVersionWithActions
+        KI_MCP_Gefaehrte_Native.SetForceSneak(companion, shouldSneak)
+    ElseIf companion.IsSneaking() != shouldSneak
+        ; The game has one call for both ways: it switches
+        companion.StartSneaking()
     EndIf
-    If companion.IsDead() || !companion.Is3DLoaded() || companion.IsInCombat() || companion.IsOnMount()
-        Return false
-    EndIf
-    If companion.GetSitState() != 0 || companion.IsSwimming()
-        Return false
-    EndIf
-    companion.StartSneaking()
-    Return true
 EndFunction
 
-; Called once a second by the follow watch
-Function CheckSneak(Actor companion)
-    If !companion || _sneakMode == SneakModeAuto
+; Gives a character back to the game: nothing is forced any more, and it is a teammate again if it was taken out of
+; that and still follows the player (isFollower)
+Function ReleaseSneak(Actor sneaker, bool isFollower)
+    bool wasCleared = _isTeammateCleared
+    _isTeammateCleared = false
+    _sneakActor = None
+    If !sneaker
         Return
     EndIf
-    ApplySneak(companion, _sneakMode == SneakModeOn)
+    If _nativeVersion >= NativeVersionWithActions
+        KI_MCP_Gefaehrte_Native.SetForceSneak(sneaker, false)
+    EndIf
+    If wasCleared && isFollower
+        sneaker.SetPlayerTeammate(true)
+    EndIf
+EndFunction
+
+; Called once a second by the follow watch, when the player presses the key for sneaking, and by the command sneak:
+; makes sure that the companion is a teammate exactly while the player does what the companion is to do
+Function UpdateSneak(Actor companion)
+    ; Another follower than the one sneak was set for (or none at all): the one from before is let go. The game has
+    ; taken it out of being a teammate itself when it was sent away
+    If _sneakActor && _sneakActor != companion
+        ReleaseSneak(_sneakActor, false)
+        _sneakMode = SneakModeAuto
+    EndIf
+    If !companion || _sneakMode == SneakModeAuto || companion.IsDead()
+        Return
+    EndIf
+    bool shouldSneak = _sneakMode == SneakModeOn
+    If Game.GetPlayer().IsSneaking() == shouldSneak
+        If _isTeammateCleared
+            _isTeammateCleared = false
+            companion.SetPlayerTeammate(true)
+        EndIf
+    ElseIf !_isTeammateCleared
+        _isTeammateCleared = true
+        _sneakActor = companion
+        companion.SetPlayerTeammate(false)
+        ForceSneak(companion, shouldSneak)
+    EndIf
+EndFunction
+
+; The player pressed the key for sneaking: what the companion has to do about it is done at once, not a second later
+Event OnControlDown(string control)
+    If control == SneakControl && _sneakMode != SneakModeAuto
+        Utility.Wait(SneakControlSeconds)
+        UpdateSneak(GetCompanion())
+    EndIf
+EndEvent
+
+; Called after a save was loaded: what was forced is forced again, in case the game did not keep it
+Function KeepSneakMode()
+    Actor companion = GetCompanion()
+    If companion && _sneakMode != SneakModeAuto && companion == _sneakActor
+        ForceSneak(companion, _sneakMode == SneakModeOn)
+    EndIf
+    UpdateSneak(companion)
 EndFunction
 
 ; sneak: on, off, or auto (anything else). Returns the text for the AI
 string Function SetSneakMode(Actor companion, string wanted)
     If wanted == SNEAK_ON || wanted == SNEAK_OFF
         bool shouldSneak = wanted == SNEAK_ON
+        ; A companion that was taken out of being a teammate for the other way goes back first
+        If _isTeammateCleared && _sneakActor == companion
+            _isTeammateCleared = false
+            companion.SetPlayerTeammate(true)
+        EndIf
         _sneakMode = SneakModeOff
         If shouldSneak
             _sneakMode = SneakModeOn
         EndIf
-        bool couldTell = ApplySneak(companion, shouldSneak)
-        If couldTell
-            Utility.Wait(SneakCheckSeconds)
-        EndIf
+        _sneakActor = companion
+        ForceSneak(companion, shouldSneak)
+        UpdateSneak(companion)
+        Utility.Wait(SneakCheckSeconds)
         string modeText = "You walk upright now, also while the player sneaks, until sneak with 'on' or 'auto'."
         If shouldSneak
             modeText = "You sneak now, whatever the player does, until sneak with 'off' or 'auto'. Speak with 'quiet' while you sneak."
@@ -5672,16 +6143,11 @@ string Function SetSneakMode(Actor companion, string wanted)
         If companion.IsSneaking() == shouldSneak
             Return modeText
         EndIf
-        If !couldTell
-            Return modeText + " Not yet, though: you cannot change that while you fight, sit, swim or are far away. It happens as soon as you can."
-        EndIf
-        Return modeText + " The game has not done it yet, though. The game mod keeps trying once a second; STATE shows 'sneaking' when you do."
+        Return modeText + " The game has not done it yet, though (it does not while you fight, sit, swim or ride). STATE shows 'sneaking' while you do."
     EndIf
     _sneakMode = SneakModeAuto
-    ; Back in line with the player at once
-    bool isPlayerSneaking = Game.GetPlayer().IsSneaking()
-    ApplySneak(companion, isPlayerSneaking)
-    If isPlayerSneaking
+    ReleaseSneak(companion, true)
+    If Game.GetPlayer().IsSneaking()
         Return "You sneak whenever the player sneaks again. The player sneaks at the moment, so you do too."
     EndIf
     Return "You sneak whenever the player sneaks again. The player walks upright at the moment, so you do too."

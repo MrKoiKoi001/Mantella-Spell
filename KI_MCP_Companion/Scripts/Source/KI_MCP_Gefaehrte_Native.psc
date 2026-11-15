@@ -194,3 +194,40 @@ Function SkipTransferEvents(bool isSkipping) global native
 ; (1 = it begins a paragraph, 0 = it goes on after a blank, 2 = it goes on right away), a tab, the text.
 ; Empty if this is no book. Reading it this way does nothing in the game: no skill goes up and no quest starts
 string[] Function GetBookText(Form book, int page) global native
+
+; The six functions below exist from interface version 18 on
+
+; Forces a character that is not the player to enter (true) or to leave (false) the sneaking state and to stay that
+; way: what the console command SetForceSneak of the game does. The game makes a follower sneak exactly when the
+; player sneaks, and a script that switches the sneaking of such a character is overruled within a moment.
+; Returns whether the command could be handed to the game; it runs a moment later
+bool Function SetForceSneak(Actor target, bool shouldSneak) global native
+
+; Casting by hand: lets a character cast the spell it holds in its right hand the way the game itself does it, with
+; the movement of the hand, out of the hand, and paid for with magicka (a spell cast with Spell.Cast has no movement
+; and comes out of the head). aimTarget is what the spell is aimed at (None = nothing in particular). The spell has
+; to be in the right hand and the hands have to be raised. Returns whether it could be handed to the game; the cast
+; begins a moment later (see GetHandCastState)
+bool Function StartHandCast(Actor caster, ObjectReference aimTarget) global native
+
+; Lets go of the spell: one that was charged flies off, one that is held (flames) stops
+bool Function EndHandCast(Actor caster) global native
+
+; How far the right hand of a character is with casting, as the game numbers it (0 = it does nothing, 5 = it charges
+; the spell, 6 = it casts). -1 = cannot tell
+int Function GetHandCastState(Actor caster) global native
+
+; An inventory in one go. filter: 0 = everything, 1 = only the favorites, 2 = only what is worn and held. The
+; favorites of the player are what the game has among its favorites; for everybody else they are the items in
+; "marked". The first text is how many kinds of items passed the filter, then one text per item, at most maxItems,
+; its parts separated by tabs: form ID as eight hex digits, how many, form type as SKSE numbers it,
+; flags (1 = worn or held, plus 2 = favorite, plus 16 times the kind of weapon or armor, see ItemKindStep), name
+string[] Function GetInventoryLines(ObjectReference owner, int filter, int maxItems, Form[] marked) global native
+
+; The function below exists from interface version 19 on
+
+; Whom a character looks at while it speaks. The game keeps several things a character can look at, and the one of
+; a dialogue comes before the one a script sets with Actor.SetLookAt. A line spoken with Actor.Say makes the game put
+; the player there. This puts lookTarget there instead (None = nobody: what the script set counts again).
+; Returns whether it could be handed to the game; it happens a moment later
+bool Function SetTalkTarget(Actor speaker, ObjectReference lookTarget) global native
