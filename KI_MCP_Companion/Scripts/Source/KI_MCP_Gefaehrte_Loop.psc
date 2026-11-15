@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 10 AutoReadOnly
+int Property ProtocolNumber = 11 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -549,6 +549,66 @@ int Property NativeVersionWithSight = 15 AutoReadOnly
 ; From interface version 16 on the SKSE plugin counts what a dead character carries (GetLootCount), and it tells
 ; with the things around how many items a container holds
 int Property NativeVersionWithLoot = 16 AutoReadOnly
+; From interface version 17 on the SKSE plugin keeps what happens in the game with the time it happened (TickEvents,
+; TakeEvents, TakeUrgentEvents) and hands out the text of a book page by page (GetBookText)
+int Property NativeVersionWithEvents = 17 AutoReadOnly
+; At most this many events go to the server with one state
+int Property MaxEventLines = 40 AutoReadOnly
+; With a request to the server, if there are any: the urgent events since the request before (a fight begins,
+; someone dies), one text per event as the plugin writes them
+string Property KEY_EVENTS = "companion_events" AutoReadOnly
+; For report_state: the ID of a book to read, as text and cut in two like the target, and the page of it (from 1).
+; The state then carries that page under "book" and the ID that was asked for under "book_for"
+string Property KEY_COMMAND_READ = "companion_read" AutoReadOnly
+string Property KEY_COMMAND_READ_HIGH = "companion_read_high" AutoReadOnly
+string Property KEY_COMMAND_READ_LOW = "companion_read_low" AutoReadOnly
+string Property KEY_COMMAND_READ_PAGE = "companion_read_page" AutoReadOnly
+; sneak: the game makes a follower sneak whenever the player sneaks. With "on" in the detail the companion sneaks
+; whatever the player does, with "off" it walks upright whatever the player does, with anything else ("auto") it
+; goes back to doing as the player does
+string Property ACTION_SNEAK = "sneak" AutoReadOnly
+string Property SNEAK_ON = "on" AutoReadOnly
+string Property SNEAK_OFF = "off" AutoReadOnly
+int Property SneakModeAuto = 0 AutoReadOnly
+int Property SneakModeOn = 1 AutoReadOnly
+int Property SneakModeOff = 2 AutoReadOnly
+; sneak: how long after the command the script looks whether the companion crouches or stands as it was told
+float Property SneakCheckSeconds = 0.6 AutoReadOnly
+; loot: at the body the companion kneels down ("IdleSearchBody" of the game), at a container it goes through it
+; ("IdleSearchingChest"). It takes the things LootKneelSeconds later, while it is down, stays LootAfterSeconds
+; and gets up again ("IdleKneelingExit" and "IdleSearchChestExit", whose event is KneelExitEvent). After
+; LootStandUpSeconds the default state makes sure that it stands. Only within LootAnimationUnits of what it loots
+int Property SearchBodyIdleFormId = 0x000EFC64 AutoReadOnly
+string Property SearchBodyEvent = "IdleKneeling" AutoReadOnly
+int Property SearchChestIdleFormId = 0x0006FF14 AutoReadOnly
+string Property SearchChestEvent = "IdleSearchingChest" AutoReadOnly
+int Property KneelExitIdleFormId = 0x000E8E53 AutoReadOnly
+int Property SearchChestExitIdleFormId = 0x000EFC70 AutoReadOnly
+string Property KneelExitEvent = "IdleChairExitStart" AutoReadOnly
+float Property LootKneelSeconds = 1.5 AutoReadOnly
+float Property LootAfterSeconds = 1.0 AutoReadOnly
+float Property LootStandUpSeconds = 1.5 AutoReadOnly
+float Property LootAnimationUnits = 250.0 AutoReadOnly
+; pick_up: the companion bends down for the thing ("IdlePickup_Ground") and has it PickUpSeconds later
+int Property PickUpIdleFormId = 0x00075C3E AutoReadOnly
+string Property PickUpEvent = "IdlePickup_Ground" AutoReadOnly
+float Property PickUpSeconds = 0.8 AutoReadOnly
+; give and take: the companion holds its hand out ("IdleGive", "IdleTake") if it stands within HandOverUnits of
+; the player, and the thing changes hands HandOverSeconds later
+int Property GiveIdleFormId = 0x000B5E20 AutoReadOnly
+string Property GiveEvent = "IdleGive" AutoReadOnly
+int Property TakeIdleFormId = 0x000B5E1F AutoReadOnly
+string Property TakeEvent = "IdleTake" AutoReadOnly
+float Property HandOverSeconds = 0.6 AutoReadOnly
+float Property HandOverUnits = 300.0 AutoReadOnly
+; Reading: a spell tome (equip) is read for TomeReadSeconds before the companion knows its spell, and a book the
+; AI reads (STATE with read) is held open if the companion carries it. Standing "IdleBook_Reading", on a chair
+; "IdleBookSitting_Reading"
+int Property ReadIdleFormId = 0x000BB052 AutoReadOnly
+string Property ReadEvent = "IdleBook_Read" AutoReadOnly
+int Property ChairReadIdleFormId = 0x0003505C AutoReadOnly
+string Property ChairReadEvent = "ChairReadingStart" AutoReadOnly
+float Property TomeReadSeconds = 2.5 AutoReadOnly
 ; What goes to the server as the name of a mount the game mod cannot name
 string Property UnknownMountName = "?" AutoReadOnly
 ; cast_spell: the companion casts a spell it knows, at once, without the movement of the hands and without paying magicka.
@@ -767,6 +827,17 @@ bool _keepsWeaponAway = false
 ; Kept from one report_state to the next, and in the save, so that it also holds right after loading
 bool _isMuteWanted = false
 float _drawWithPlayerUnits = 0.0
+; sneak: whether the companion sneaks as the player does (SneakModeAuto), always or never
+int _sneakMode = 0
+; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
+; It still counts as busy, so that the next command of a chain waits until it stands again
+bool _isLooting = false
+; The book the last report_state command asked to read (its ID as text, "" = none, and in two halves) and the page.
+; Used up by BuildState
+string _wantedBookText = ""
+int _wantedBookHigh = 0
+int _wantedBookLow = 0
+int _wantedBookPage = 1
 
 ; --------------------------------------------------------------------- events
 
@@ -892,6 +963,14 @@ Function SendPoll(int[] resultHandles, bool isStateWanted)
     If isStateWanted
         SKSE_HTTP.setNestedDictionary(requestHandle, KEY_STATE, BuildState())
     EndIf
+    ; What cannot wait until the AI asks for the state: a fight that begins, someone who dies. The server hangs
+    ; it onto its next answer to the AI. A state that goes along has taken these already (see BuildState)
+    If _nativeVersion >= NativeVersionWithEvents
+        string[] urgentLines = KI_MCP_Gefaehrte_Native.TakeUrgentEvents()
+        If urgentLines.Length > 0
+            SKSE_HTTP.setStringArray(requestHandle, KEY_EVENTS, urgentLines)
+        EndIf
+    EndIf
     If resultHandles.Length > 0
         SKSE_HTTP.setNestedDictionariesArray(requestHandle, KEY_RESULTS, resultHandles)
     EndIf
@@ -954,11 +1033,11 @@ int Function BuildState()
 
     ; Health in percent, in combat, position x, y and z in game units,
     ; direction the player faces in degrees (0 = north, 90 = east), indoors, weapon drawn,
-    ; sitting and sleeping as the game tells them (3 = seated, 3 = asleep, see GetSitState and GetSleepState)
+    ; sitting and sleeping as the game tells them (3 = seated, 3 = asleep, see GetSitState and GetSleepState), sneaking
     float playerX = player.GetPositionX()
     float playerY = player.GetPositionY()
     float playerZ = player.GetPositionZ()
-    int[] playerValues = new int[10]
+    int[] playerValues = new int[11]
     playerValues[0] = GetHealthPercent(player)
     playerValues[1] = ToNumber(player.IsInCombat())
     playerValues[2] = playerX as int
@@ -969,6 +1048,7 @@ int Function BuildState()
     playerValues[7] = ToNumber(player.IsWeaponDrawn())
     playerValues[8] = player.GetSitState()
     playerValues[9] = player.GetSleepState()
+    playerValues[10] = ToNumber(player.IsSneaking())
     SKSE_HTTP.setIntArray(stateHandle, "player", playerValues)
 
     ; Only when the server asked for them: level, skills and so on. They cost about thirty questions to the game
@@ -1122,6 +1202,16 @@ int Function BuildState()
         EndIf
     EndIf
 
+    ; What happened since the last state: fights, deaths, hits, what the player used, read and took, one text per
+    ; event with how long ago it was (see KI_MCP_Gefaehrte_Native.psc). The plugin forgets an event once it has
+    ; handed it out, the server keeps it for the AI
+    If _nativeVersion >= NativeVersionWithEvents
+        string[] eventLines = KI_MCP_Gefaehrte_Native.TakeEvents(MaxEventLines)
+        If eventLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "events", eventLines)
+        EndIf
+    EndIf
+
     ; No "companion" entry means: the player has no follower at the moment
     Actor companionTarget = None
     If companion
@@ -1187,6 +1277,12 @@ int Function BuildState()
         AddCorpseToState(stateHandle, _wantedCorpse)
     EndIf
     _wantedCorpse = None
+    ; Only when the server asked for it: one page of a book or a note
+    string wantedBookText = _wantedBookText
+    _wantedBookText = ""
+    If wantedBookText != ""
+        AddBookToState(stateHandle, companion, wantedBookText, GetFormFromHalves(_wantedBookHigh, _wantedBookLow), _wantedBookPage)
+    EndIf
 
     ; What became of loot, move_to and sit since the last state. The text is taken out first,
     ; because a walk that ends while this script waits for the game adds to it
@@ -1235,9 +1331,9 @@ EndFunction
 ; sitting as the game tells it (see SitStateSeated), weapon drawn,
 ; ref ID of what the companion looks at because of look_at (0 = nothing in particular),
 ; ref ID of whom the companion follows because of follow with a target (0 = the player or nobody),
-; keeps its weapon put away because of sheathe
+; keeps its weapon put away because of sheathe, running, sneaking, and how it sneaks because of sneak (see SneakModeAuto)
 int[] Function BuildCompanionValues(Actor companion, Actor player, Actor companionTarget)
-    int[] companionValues = new int[18]
+    int[] companionValues = new int[20]
     companionValues[0] = companion.GetFormID()
     companionValues[1] = GetHealthPercent(companion)
     companionValues[2] = ToNumber(companion.IsDead())
@@ -1276,7 +1372,59 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
     EndIf
     companionValues[16] = ToNumber(_keepsWeaponAway)
     companionValues[17] = ToNumber(companion.IsRunning() || companion.IsSprinting())
+    companionValues[18] = ToNumber(companion.IsSneaking())
+    companionValues[19] = _sneakMode
     Return companionValues
+EndFunction
+
+; read: one page of a book or a note for the AI. bookForm is the book itself (its ID from an inventory or from the
+; events) or a book that lies in the world (its ref_id from the things). The plugin takes the marks of the game out
+; of the text and cuts it into pages. The ID that was asked for goes back too, so that the server can tell
+; "that is no book" from "could not look". Reading this way does nothing in the game
+Function AddBookToState(int stateHandle, Actor companion, string bookText, Form bookForm, int page)
+    SetStringSafely(stateHandle, "book_for", bookText)
+    If !bookForm || _nativeVersion < NativeVersionWithEvents
+        Return
+    EndIf
+    string[] bookLines = KI_MCP_Gefaehrte_Native.GetBookText(bookForm, page)
+    If bookLines.Length == 0
+        Return
+    EndIf
+    SKSE_HTTP.setStringArray(stateHandle, "book", bookLines)
+    ; A companion that carries the book opens it, on the first page
+    Form bookBase = bookForm
+    ObjectReference bookRef = bookForm as ObjectReference
+    If bookRef
+        bookBase = bookRef.GetBaseObject()
+    EndIf
+    If companion && page <= 1 && bookBase && companion.GetItemCount(bookBase) > 0
+        PlayReadAnimation(companion)
+    EndIf
+EndFunction
+
+; The companion opens a book and reads, standing or on a chair, until a command makes it move on or 'gesture'
+; with 'stop' ends it. Returns whether the game played it
+bool Function PlayReadAnimation(Actor companion)
+    If companion.IsDead() || !companion.Is3DLoaded() || companion.IsInCombat() || companion.IsOnMount() || companion.IsSneaking() || _walkTarget || _isLooting
+        Return false
+    EndIf
+    bool isSeated = companion.GetSitState() == SitStateSeated
+    If !isSeated && !IsHoldingStill(companion)
+        Return false
+    EndIf
+    int readIdleId = ReadIdleFormId
+    string readEvent = ReadEvent
+    If isSeated
+        readIdleId = ChairReadIdleFormId
+        readEvent = ChairReadEvent
+    EndIf
+    If PlayGesture(companion, Game.GetForm(readIdleId) as Idle, readEvent) == ""
+        Return false
+    EndIf
+    _isGesturing = true
+    _isSitGesture = isSeated
+    _gestureStopEvent = ""
+    Return true
 EndFunction
 
 ; Whether a character is inside a building (or a cave ...) the player is not in. The game has not loaded that place
@@ -1871,6 +2019,10 @@ int[] Function RunCommands(int[] commandHandles)
             _wantedSpaceAngle = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_SPACE_ANGLE, SpaceFullCircleDegrees)
             _wantedFind = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_FIND, "")
             _wantedInventoryFilter = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_INVENTORY_FILTER, "")
+            _wantedBookText = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_READ, "")
+            _wantedBookHigh = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_READ_HIGH, 0)
+            _wantedBookLow = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_READ_LOW, 0)
+            _wantedBookPage = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_READ_PAGE, 1)
             _isMuteWanted = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_MUTE, 0) != 0
             If _wantedInventory == INVENTORY_CORPSE
                 _wantedCorpse = GetTargetForm(commandHandles[index]) as ObjectReference
@@ -1904,7 +2056,7 @@ int Function RunCommand(int commandHandle, string actionName)
     string resultText = ""
     Actor companion = GetCompanion()
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -1940,6 +2092,14 @@ int Function RunCommand(int commandHandle, string actionName)
             Else
                 resultText = "The game did not take the new name for " + oldHorseName + "."
             EndIf
+        EndIf
+    ElseIf actionName == ACTION_SNEAK
+        string sneakDetail = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
+        If sneakDetail == SNEAK_ON && (IsRideWanted() || companion.IsOnMount())
+            resultText = "You cannot sneak in the saddle. Get off first with dismount."
+        Else
+            isOk = true
+            resultText = SetSneakMode(companion, sneakDetail)
         EndIf
     ElseIf (IsRideWanted() || companion.IsOnMount()) && IsOnFootAction(actionName, commandHandle)
         resultText = "You sit on your horse, and this is something you do on foot. Get off first with dismount."
@@ -2412,7 +2572,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE
         Return true
     EndIf
-    If actionName == ACTION_RELEASE_HORSE
+    If actionName == ACTION_RELEASE_HORSE || actionName == ACTION_SNEAK
         Return true
     EndIf
     Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
@@ -2459,10 +2619,10 @@ string Function DoCommand(Actor companion, string actionName, ObjectReference ta
 EndFunction
 
 ; Whether the companion only waits because a command made it wait for a while, although it was following the player:
-; a loot or pick_up that is still running, or a make_room. The command that asks takes over from there:
+; a loot or pick_up that is still running (also while it kneels and takes the things), or a make_room. The command that asks takes over from there:
 ; it has to make the companion follow again, or leave it waiting on purpose
 bool Function TakeFollowAgain()
-    bool followAgain = (_isLootWalk && _followAfterLoot) || _isRoomHold
+    bool followAgain = ((_isLootWalk || _isLooting) && _followAfterLoot) || _isRoomHold
     _isRoomHold = false
     Return followAgain
 EndFunction
@@ -2574,6 +2734,13 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
             If companion.HasSpell(taughtSpell)
                 Return "You know the spell " + taughtSpell.GetName() + " already, so you keep " + itemName + "."
             EndIf
+            ; The companion opens the tome and reads for a moment before it knows the spell
+            If PlayReadAnimation(companion)
+                Utility.Wait(TomeReadSeconds)
+                If !_isSitGesture
+                    StopGesture(companion)
+                EndIf
+            EndIf
             companion.AddSpell(taughtSpell, false)
             companion.RemoveItem(item, 1, true)
             Return "You read " + itemName + " and know the spell " + taughtSpell.GetName() + " now. The tome is used up. Cast the spell with cast_spell."
@@ -2607,7 +2774,26 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
     If wantedCount > 0 && wantedCount < count
         count = wantedCount
     EndIf
+    ; The companion holds its hand out, if it stands next to the player and has its hands free
+    If CanPlayTaskAnimation(companion) && IsHoldingStill(companion) && companion.GetDistance(player) <= HandOverUnits
+        string handOverWay = ""
+        If actionName == ACTION_TAKE
+            handOverWay = PlayGesture(companion, Game.GetForm(TakeIdleFormId) as Idle, TakeEvent)
+        Else
+            handOverWay = PlayGesture(companion, Game.GetForm(GiveIdleFormId) as Idle, GiveEvent)
+        EndIf
+        If handOverWay != ""
+            Utility.Wait(HandOverSeconds)
+        EndIf
+    EndIf
+    ; What the script moves itself is no news for the events of the plugin
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
+    EndIf
     giver.RemoveItem(item, count, true, receiver)
+    If _nativeVersion >= NativeVersionWithEvents
+        KI_MCP_Gefaehrte_Native.SkipTransferEvents(false)
+    EndIf
     If actionName == ACTION_TAKE
         Return "You take " + count + " " + itemName + " from the player."
     EndIf
@@ -3883,6 +4069,12 @@ EndFunction
 
 ; Called when the walk to the thing is over (see FinishLoot)
 Function FinishPickUp(Actor companion, ObjectReference itemRef)
+    ; The companion bends down for the thing, if it stands next to it. It gets the thing either way
+    If itemRef && !itemRef.IsDisabled() && CanPlayTaskAnimation(companion) && companion.GetDistance(itemRef) <= LootAnimationUnits
+        If PlayGesture(companion, Game.GetForm(PickUpIdleFormId) as Idle, PickUpEvent) != ""
+            Utility.Wait(PickUpSeconds)
+        EndIf
+    EndIf
     If _pickUpHigh != 0 || _pickUpLow != 0
         string arrowName = KI_MCP_Gefaehrte_Native.TakeRestingArrow(companion, _pickUpHigh, _pickUpLow)
         _pickUpHigh = 0
@@ -3973,10 +4165,25 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
         ; The walk led to a thing that lies around (see pick_up)
         _isPickUp = false
         FinishPickUp(companion, corpse)
-        If _followAfterLoot && ownWalkNumber == _walkNumber
-            SetWaiting(companion, false)
+        If ownWalkNumber == _walkNumber
+            If _followAfterLoot
+                SetWaiting(companion, false)
+            EndIf
+            _isLooting = false
         EndIf
         Return
+    EndIf
+    ; The companion kneels down at the body or goes through the container, and only then takes the things.
+    ; If the game does not play that, or the companion did not get close, it takes them standing as before
+    bool isDown = StartLootAnimation(companion, corpse)
+    If isDown
+        Utility.Wait(LootKneelSeconds)
+        If ownWalkNumber != _walkNumber
+            ; A newer command has taken over while the companion was kneeling down: it gets up and takes nothing
+            EndLootAnimation(companion, corpse, true)
+            AddReport("You got up from " + GetLootName(corpse) + " without taking anything, because your next command came first.")
+            Return
+        EndIf
     EndIf
     string lootName = GetLootName(corpse)
     string reportText = ""
@@ -4004,18 +4211,76 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
             reportText = "You went through " + lootName + ". The game listed nothing in it."
         EndIf
     EndIf
-    If !hasArrived
+    If !hasArrived && !isDown
         reportText = reportText + " You did not get all the way there."
     EndIf
+    If isDown
+        ; A moment longer over the things, then up again. A newer command makes it get up at once
+        If ownWalkNumber == _walkNumber
+            Utility.Wait(LootAfterSeconds)
+        EndIf
+        EndLootAnimation(companion, corpse, ownWalkNumber != _walkNumber)
+    EndIf
+    ; What became of it is told while the companion still counts as busy (see OnWalkRequested for why)
     If hasLooted
         AddReport(reportText)
     Else
         AddFailReport(reportText)
     EndIf
     ; A newer command has the last word on following and waiting
-    If _followAfterLoot && ownWalkNumber == _walkNumber
-        SetWaiting(companion, false)
+    If ownWalkNumber == _walkNumber
+        If _followAfterLoot
+            SetWaiting(companion, false)
+        EndIf
+        _isLooting = false
     EndIf
+EndFunction
+
+; Whether the companion can play an animation for what it does with its hands: it stands on its feet in the loaded
+; area and neither fights, rides, sits, swims nor sneaks
+bool Function CanPlayTaskAnimation(Actor companion)
+    If companion.IsDead() || !companion.Is3DLoaded() || companion.IsInCombat() || companion.IsOnMount()
+        Return false
+    EndIf
+    Return companion.GetSitState() == 0 && !companion.IsSneaking() && !companion.IsSwimming()
+EndFunction
+
+; loot: the companion kneels down at a body, or goes through a container. Returns whether an animation was
+; started: then EndLootAnimation has to follow. Not if the companion did not get close to what it loots
+bool Function StartLootAnimation(Actor companion, ObjectReference corpse)
+    If !corpse || corpse.IsDisabled() || !CanPlayTaskAnimation(companion)
+        Return false
+    EndIf
+    If companion.GetDistance(corpse) > LootAnimationUnits + GetHalfSize(corpse)
+        Return false
+    EndIf
+    int searchIdleId = SearchChestIdleFormId
+    string searchEvent = SearchChestEvent
+    If corpse as Actor
+        searchIdleId = SearchBodyIdleFormId
+        searchEvent = SearchBodyEvent
+    EndIf
+    Return PlayGesture(companion, Game.GetForm(searchIdleId) as Idle, searchEvent) != ""
+EndFunction
+
+; loot: the companion gets up again. First the animation of the game for getting up, and if the game refuses
+; that, its event. isQuick: a newer command is waiting, so the companion is put on its feet at once
+Function EndLootAnimation(Actor companion, ObjectReference corpse, bool isQuick)
+    If isQuick
+        Debug.SendAnimationEvent(companion, AnimationEventDefault)
+        Return
+    EndIf
+    int exitIdleId = SearchChestExitIdleFormId
+    If corpse as Actor
+        exitIdleId = KneelExitIdleFormId
+    EndIf
+    Idle exitIdle = Game.GetForm(exitIdleId) as Idle
+    If !exitIdle || !companion.PlayIdle(exitIdle)
+        Debug.SendAnimationEvent(companion, KneelExitEvent)
+    EndIf
+    Utility.Wait(LootStandUpSeconds)
+    ; In case the game played neither: the companion must not stay on its knees
+    Debug.SendAnimationEvent(companion, AnimationEventDefault)
 EndFunction
 
 ; A report about something that did not work out. The server gets the count with every request: commands that
@@ -4029,7 +4294,7 @@ EndFunction
 ; over to someone to speak, getting on its horse, or riding somewhere. The server lets the next command of a chain
 ; wait until this is over
 bool Function IsBusy()
-    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting || _isTurning
+    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting || _isTurning || _isLooting
         Return true
     EndIf
     If !_rideTarget
@@ -5349,9 +5614,78 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             CheckRideWithPlayer()
             CheckCatchUp()
             CheckFavoriteGear(GetCompanion())
+            CheckSneak(GetCompanion())
+            ; The plugin learns who the companion is, and keeps what has no event of the game (see TickEvents)
+            If _nativeVersion >= NativeVersionWithEvents
+                KI_MCP_Gefaehrte_Native.TickEvents(GetCompanion())
+            EndIf
         EndIf
     EndWhile
 EndEvent
+
+; ---------------------------------------------------------------------- sneak
+; The game makes a follower sneak whenever the player sneaks, and stand up when the player does. sneak with on or off
+; takes the companion out of that: it sneaks, or walks upright, whatever the player does. The game has one call for
+; both ways (Actor.StartSneaking switches), so the script only calls it when the companion is not as it should be.
+; The follow watch looks once a second, because the game puts a follower back in line with the player
+
+; Makes the companion sneak or stand up, if it is not so already. Returns false if it cannot be told at the moment:
+; not while it fights, rides, sits or swims, and not far away
+bool Function ApplySneak(Actor companion, bool shouldSneak)
+    If companion.IsSneaking() == shouldSneak
+        Return true
+    EndIf
+    If companion.IsDead() || !companion.Is3DLoaded() || companion.IsInCombat() || companion.IsOnMount()
+        Return false
+    EndIf
+    If companion.GetSitState() != 0 || companion.IsSwimming()
+        Return false
+    EndIf
+    companion.StartSneaking()
+    Return true
+EndFunction
+
+; Called once a second by the follow watch
+Function CheckSneak(Actor companion)
+    If !companion || _sneakMode == SneakModeAuto
+        Return
+    EndIf
+    ApplySneak(companion, _sneakMode == SneakModeOn)
+EndFunction
+
+; sneak: on, off, or auto (anything else). Returns the text for the AI
+string Function SetSneakMode(Actor companion, string wanted)
+    If wanted == SNEAK_ON || wanted == SNEAK_OFF
+        bool shouldSneak = wanted == SNEAK_ON
+        _sneakMode = SneakModeOff
+        If shouldSneak
+            _sneakMode = SneakModeOn
+        EndIf
+        bool couldTell = ApplySneak(companion, shouldSneak)
+        If couldTell
+            Utility.Wait(SneakCheckSeconds)
+        EndIf
+        string modeText = "You walk upright now, also while the player sneaks, until sneak with 'on' or 'auto'."
+        If shouldSneak
+            modeText = "You sneak now, whatever the player does, until sneak with 'off' or 'auto'. Speak with 'quiet' while you sneak."
+        EndIf
+        If companion.IsSneaking() == shouldSneak
+            Return modeText
+        EndIf
+        If !couldTell
+            Return modeText + " Not yet, though: you cannot change that while you fight, sit, swim or are far away. It happens as soon as you can."
+        EndIf
+        Return modeText + " The game has not done it yet, though. The game mod keeps trying once a second; STATE shows 'sneaking' when you do."
+    EndIf
+    _sneakMode = SneakModeAuto
+    ; Back in line with the player at once
+    bool isPlayerSneaking = Game.GetPlayer().IsSneaking()
+    ApplySneak(companion, isPlayerSneaking)
+    If isPlayerSneaking
+        Return "You sneak whenever the player sneaks again. The player sneaks at the moment, so you do too."
+    EndIf
+    Return "You sneak whenever the player sneaks again. The player walks upright at the moment, so you do too."
+EndFunction
 
 ; Tells the SKSE plugin whose own sentences of the game it is to cut off: the follower of the moment if the server
 ; wants that (setting mute_game_lines), otherwise nobody. Without a follower nobody is muted,
@@ -5460,6 +5794,10 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
         ElseIf _isMoveWalk
             ReportMoveWalk(companion)
         EndIf
+    EndIf
+    ; Taking the things takes a moment (see FinishLoot). The companion stays busy without a gap until that is over
+    If isLootWalk
+        _isLooting = true
     EndIf
     _walkTarget = None
     _walkShownTarget = None
@@ -5587,6 +5925,9 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
         SendModEvent(EVENT_WALK_WATCH, "", _walkNumber as float)
         Return
     EndIf
+    If _isLootWalk
+        _isLooting = true
+    EndIf
     _walkTarget = None
     ObjectReference shownTarget = _walkShownTarget
     _walkShownTarget = None
@@ -5644,6 +5985,8 @@ Function EndWalk()
     _isPickUp = false
     _lootItem = None
     _walkRestartCount = 0
+    ; A companion that is taking things at the moment notices the new number and gets up (see FinishLoot)
+    _isLooting = false
 EndFunction
 
 ; Raised by EndWalk for a walk that was still going on. numArg is the number of the walks after it was ended: if a

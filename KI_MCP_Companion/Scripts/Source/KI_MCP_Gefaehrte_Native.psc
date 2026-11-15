@@ -163,3 +163,34 @@ string[] Function GetVisiblePlaces(int radiusMeters, int maxMarkers, int maxDoor
 
 ; How many different items a dead character carries or a container holds that can be taken (-1 = cannot tell)
 int Function GetLootCount(ObjectReference holder) global native
+
+; The five functions below exist from interface version 17 on
+
+; The plugin keeps what happens around the player and the companion as short texts with the time it happened: fights,
+; deaths, the hits the player and the companion take (counted together, with the health they cost), where the player
+; goes, what the player uses, reads, takes, puts on and casts, and whom the player talks to. The companion is "you"
+; in these texts. Call this about once a second with the companion of the moment (None = there is none): it tells
+; the plugin who the companion is, keeps what has no event of the game (the player begins or stops sneaking or
+; fighting) and ends what is counted together
+Function TickEvents(Actor companion) global native
+
+; What happened since the last call, oldest first, at most maxLines (then the newest ones). One text per event, its
+; parts separated by tabs: how many seconds ago, the time of day in the game in minutes since midnight,
+; urgent (1 or 0), what happened. The plugin forgets an event once it has handed it out
+string[] Function TakeEvents(int maxLines) global native
+
+; Only the urgent events since the last call (a fight begins, someone dies or goes down, someone is left with little
+; health), built like the lines of TakeEvents. They are forgotten as well, the others stay for TakeEvents
+string[] Function TakeUrgentEvents() global native
+
+; While this is set, things that change hands between the player and the companion are no event: the script moves
+; them itself then (give, take), and the AI knows about it
+Function SkipTransferEvents(bool isSkipping) global native
+
+; The text of a book or a note, one page of it (from 1; too high = the last one). book is the book itself or a book
+; that lies in the world. The first text tells about the book, its parts separated by tabs: the number of this page,
+; how many pages there are (0 = the book has no text), the kind (0 = book, 1 = note, 2 = spell tome), the form ID of
+; the book as eight hex digits, its title. Then one text per piece of the page: how it joins what came before
+; (1 = it begins a paragraph, 0 = it goes on after a blank, 2 = it goes on right away), a tab, the text.
+; Empty if this is no book. Reading it this way does nothing in the game: no skill goes up and no quest starts
+string[] Function GetBookText(Form book, int page) global native
