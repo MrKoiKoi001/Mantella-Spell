@@ -27,8 +27,8 @@ ScheduleHour: -1
 ScheduleMinute: -1
 Unknown3: 0x000000
 OwnerQuest: 00080C:KI_MCP_Gefaehrte.esp
-PackageTemplate: 0750BE:Skyrim.esm
-DataInputVersion: 8
+PackageTemplate: 019B2C:Skyrim.esm
+DataInputVersion: 4
 Data:
 - Key: 0
   Value:
@@ -45,54 +45,17 @@ Data:
   Value:
     MutagenObjectType: PackageDataFloat
     Data: 760
+- Key: 4
+  Value:
+    MutagenObjectType: PackageDataBool
 - Key: 6
   Value:
     MutagenObjectType: PackageDataBool
     Data: True
-- Key: 9
-  Value:
-    MutagenObjectType: PackageDataLocation
-    Location:
-      Target:
-        MutagenObjectType: LocationFallback
-        Type: NearSelf
-      Radius: 256
-- Key: 10
+- Key: 8
   Value:
     MutagenObjectType: PackageDataBool
-    Data: True
-- Key: 11
-  Value:
-    MutagenObjectType: PackageDataBool
-- Key: 16
-  Value:
-    MutagenObjectType: PackageDataBool
-    Data: True
-- Key: 17
-  Value:
-    MutagenObjectType: PackageDataBool
-- Key: 18
-  Value:
-    MutagenObjectType: PackageDataBool
-- Key: 19
-  Value:
-    MutagenObjectType: PackageDataBool
-    Data: True
-- Key: 20
-  Value:
-    MutagenObjectType: PackageDataBool
-    Data: True
-- Key: 21
-  Value:
-    MutagenObjectType: PackageDataBool
-- Key: 23
-  Value:
-    MutagenObjectType: PackageDataFloat
-- Key: 25
-  Value:
-    MutagenObjectType: PackageDataBool
-    Data: True
-XnamMarker: 0x1A
+XnamMarker: 0x09
 OnBegin:
   Topics:
   - MutagenObjectType: TopicReference

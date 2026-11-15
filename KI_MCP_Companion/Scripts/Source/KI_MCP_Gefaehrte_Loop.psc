@@ -166,6 +166,9 @@ string Property EVENT_WALK = "KI_MCP_Gefaehrte_Walk" AutoReadOnly
 ; Own event that keeps an eye on such a walk: in the game a walk sometimes never started, and the call that
 ; starts it never came back. And the own event that waits until the companion sits (see OnSitRequested)
 string Property EVENT_WALK_WATCH = "KI_MCP_Gefaehrte_WalkWatch" AutoReadOnly
+; A walk that is ended before the companion has arrived has to be broken off: the game only drops a walk it was
+; told to do (Actor.PathToReference) when it is told another one. So the companion is sent to a marker at its own feet
+string Property EVENT_WALK_STOP = "KI_MCP_Gefaehrte_WalkStop" AutoReadOnly
 string Property EVENT_SIT = "KI_MCP_Gefaehrte_Sit" AutoReadOnly
 ; A walk starts this long after its command, so that the game is done with the new orders (wait, follow)
 ; of the companion before it gets sent off
@@ -183,6 +186,22 @@ int Property WalkRestarts = 2 AutoReadOnly
 float Property EnterReachUnits = 420.0 AutoReadOnly
 ; make_room: the thing of the game nobody sees that marks the spot the companion walks to (XMarker of Skyrim.esm)
 int Property XMarkerFormId = 0x0000003B AutoReadOnly
+; face and look_at: turning with the animation of the game instead of jumping round. A character that travels to a
+; marker with a heading turns to that heading when it is there. So the companion is put into the alias "Turner" of
+; the turn quest and such a marker, at its own spot, into the alias "Heading": the travel package does the turning
+int Property XMarkerHeadingFormId = 0x00000034 AutoReadOnly
+int Property TurnQuestFormId = 0x00000819 AutoReadOnly
+int Property TurnAliasTurner = 0 AutoReadOnly
+int Property TurnAliasHeading = 1 AutoReadOnly
+; A turn smaller than TurnSmallDegrees is set at once, there is no jump to see. A turn is done when less than
+; TurnDoneDegrees are left. If nothing has happened after TurnStartSeconds, or the turn is not done after
+; TurnLongestSeconds, the game does not play it and the companion is turned at once after all
+float Property TurnSmallDegrees = 20.0 AutoReadOnly
+float Property TurnDoneDegrees = 12.0 AutoReadOnly
+float Property TurnProgressDegrees = 8.0 AutoReadOnly
+float Property TurnCheckSeconds = 0.2 AutoReadOnly
+float Property TurnStartSeconds = 1.4 AutoReadOnly
+float Property TurnLongestSeconds = 4.0 AutoReadOnly
 ; make_room: the numbers the server sends for the directions (anything else = back, away from the player),
 ; how far the companion steps if the server names no distance, and the furthest it may be sent
 int Property RoomDirectionLeft = 1 AutoReadOnly
@@ -258,6 +277,15 @@ float Property VisibleHalfAngleDegrees = 60.0 AutoReadOnly
 float Property LookTurnDegrees = 70.0 AutoReadOnly
 ; The animation event that brings a character back to standing normally. It ends a gesture that would go on forever
 string Property AnimationEventDefault = "IdleForceDefaultState" AutoReadOnly
+; Being drunk is ended by the animation "IdleDrunkStop" of the game, whose event is DrunkStopEvent. The event alone,
+; sent together with the default state, did not end it in the game. StateStopSeconds lie between the two now
+int Property DrunkStopIdleFormId = 0x000CEFD1 AutoReadOnly
+string Property DrunkStopEvent = "DrunkStop" AutoReadOnly
+float Property StateStopSeconds = 0.5 AutoReadOnly
+; "IdleStop_Loose" of the game: a player reported that playing it ended a drunk animation that would not stop.
+; It has no conditions. Its event is LooseStopEvent
+int Property LooseStopIdleFormId = 0x0010D9EE AutoReadOnly
+string Property LooseStopEvent = "IdleStop" AutoReadOnly
 
 ; ------------------------------------------------------------------- protocol
 ; These strings have to match src/companion/companion_constants.py in the Mantella fork
@@ -571,6 +599,10 @@ Quest _horseQuest
 Quest _playerHorseQuest
 Quest _horseCallQuest
 Quest _rideWalkQuest
+Quest _turnQuest
+ObjectReference _stopMarker
+ObjectReference _turnMarker
+bool _isTurning = false
 Quest _rideTravelQuest
 int _rideWatchNumber = 0
 Faction _horseFaction
@@ -753,6 +785,7 @@ Function StartLoop()
     RegisterForModEvent(EVENT_SAY_APPROACH, "OnSayApproachRequested")
     RegisterForModEvent(EVENT_FOLLOW_WATCH, "OnFollowWatchRequested")
     RegisterForModEvent(EVENT_MOUNT_HELP, "OnMountHelpRequested")
+    RegisterForModEvent(EVENT_WALK_STOP, "OnWalkStopRequested")
     RegisterForModEvent(EVENT_RIDE_WATCH, "OnRideWatchRequested")
     RegisterForModEvent(EVENT_DISMOUNT_HELP, "OnDismountHelpRequested")
     RegisterForModEvent(EVENT_HORSE_CALL, "OnHorseCallRequested")
@@ -2776,7 +2809,7 @@ string Function DoLookAt(Actor companion, ObjectReference target)
     ; The head only turns so far. If the target is further to the side and the companion stands around, the body turns as well
     float angle = companion.GetHeadingAngle(target)
     If (angle > LookTurnDegrees || angle < -LookTurnDegrees) && !IsWalking(companion) && !companion.IsInCombat() && companion.GetSitState() == 0
-        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), companion.GetAngleZ() + angle)
+        TurnTo(companion, companion.GetAngleZ() + angle)
     EndIf
     Return "You look at " + target.GetDisplayName() + " now. 'look_at' without a target lets you look around freely again."
 EndFunction
@@ -3242,9 +3275,31 @@ EndFunction
 
 ; gesture with stop: ends the gesture that plays, and a state like being drunk
 string Function EndGesture(Actor companion)
-    If _stateStopEvent != ""
-        Debug.SendAnimationEvent(companion, _stateStopEvent)
+    ; A state like being drunk is ended whenever the companion stands, also if the script does not know of one:
+    ; an earlier stop may have failed in the game while the script took the state for ended
+    bool isSeated = companion.GetSitState() == SitStateSeated && !companion.IsOnMount()
+    If _stateStopEvent != "" || !isSeated
+        ; First the animation of the game that ends the state, as its start was played, then its event as well.
+        ; The default state only comes after a moment, and only if a gesture plays too: sent in the same breath
+        ; it kept the state from ending
+        bool wasStateOn = _stateStopEvent != ""
         _stateStopEvent = ""
+        Idle stopIdle = Game.GetForm(DrunkStopIdleFormId) as Idle
+        If stopIdle
+            companion.PlayIdle(stopIdle)
+        EndIf
+        Utility.Wait(StateStopSeconds)
+        Debug.SendAnimationEvent(companion, DrunkStopEvent)
+        ; And the animation that stops what goes on loosely, in case the state is still on
+        Utility.Wait(StateStopSeconds)
+        Idle looseStopIdle = Game.GetForm(LooseStopIdleFormId) as Idle
+        If !looseStopIdle || !companion.PlayIdle(looseStopIdle)
+            Debug.SendAnimationEvent(companion, LooseStopEvent)
+        EndIf
+        If wasStateOn && !_isGesturing
+            Return "You stop it and move normally again. If you still sway, say so: then the game did not end it."
+        EndIf
+        Utility.Wait(StateStopSeconds)
     EndIf
     If companion.GetSitState() == SitStateSeated && !companion.IsOnMount()
         ; Never the default state while sitting (see StopGesture)
@@ -3652,11 +3707,95 @@ string Function DoFace(Actor companion, ObjectReference target, int degrees, str
     If target
         heading = companion.GetAngleZ() + companion.GetHeadingAngle(target)
     EndIf
-    companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), heading)
-    If target
-        Return "You turn to face " + target.GetDisplayName() + "."
+    ; This only comes back when the companion has turned
+    string turnNote = ""
+    If !TurnTo(companion, heading)
+        turnNote = " The game did not play the turn, so you were turned at once."
     EndIf
-    Return "You turn to face " + directionWords + "."
+    If target
+        Return "You have turned to face " + target.GetDisplayName() + "." + turnNote
+    EndIf
+    Return "You have turned to face " + directionWords + "." + turnNote
+EndFunction
+
+ReferenceAlias Function GetTurnAlias(int aliasId)
+    If !_turnQuest
+        _turnQuest = Game.GetFormFromFile(TurnQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_turnQuest
+        Return None
+    EndIf
+    If !_turnQuest.IsRunning()
+        _turnQuest.Start()
+    EndIf
+    Return _turnQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; How many degrees the companion still has to turn to face this heading, from -180 (to the left) to 180 (to the right)
+float Function GetTurnLeft(Actor companion, float heading)
+    float turnLeft = heading - companion.GetAngleZ()
+    While turnLeft > 180.0
+        turnLeft -= 360.0
+    EndWhile
+    While turnLeft < -180.0
+        turnLeft += 360.0
+    EndWhile
+    Return turnLeft
+EndFunction
+
+; Turns the companion to a heading (degrees, clockwise from north) and only comes back when it faces there.
+; With the turn animation of the game where that works (see XMarkerHeadingFormId): returns true then, also for a
+; turn so small that nobody sees a jump. Returns false if the companion had to be turned at once: in the saddle,
+; with a plugin of the mod that has no turn quest, or when the game did not play the turn
+bool Function TurnTo(Actor companion, float heading)
+    float turnLeft = GetTurnLeft(companion, heading)
+    If turnLeft <= TurnSmallDegrees && turnLeft >= -TurnSmallDegrees
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), heading)
+        Return true
+    EndIf
+    ReferenceAlias turnerAlias = GetTurnAlias(TurnAliasTurner)
+    ReferenceAlias headingAlias = GetTurnAlias(TurnAliasHeading)
+    If !_turnMarker
+        Form markerBase = Game.GetForm(XMarkerHeadingFormId)
+        If markerBase
+            _turnMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
+    ; The travel package of the turn quest has no "ride": it would take a rider off its horse
+    If !turnerAlias || !headingAlias || !_turnMarker || companion.IsOnMount() || IsRideWanted()
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), heading)
+        Return false
+    EndIf
+    _turnMarker.MoveTo(companion)
+    _turnMarker.SetAngle(0.0, 0.0, heading)
+    headingAlias.ForceRefTo(_turnMarker)
+    turnerAlias.ForceRefTo(companion)
+    companion.EvaluatePackage()
+    _isTurning = true
+    float startLeft = Math.abs(turnLeft)
+    float waitedSeconds = 0.0
+    bool isDone = false
+    bool isGivenUp = false
+    While !isDone && !isGivenUp
+        Utility.Wait(TurnCheckSeconds)
+        waitedSeconds += TurnCheckSeconds
+        float nowLeft = Math.abs(GetTurnLeft(companion, heading))
+        If nowLeft <= TurnDoneDegrees
+            isDone = true
+        ElseIf waitedSeconds >= TurnLongestSeconds
+            isGivenUp = true
+        ElseIf waitedSeconds >= TurnStartSeconds && startLeft - nowLeft < TurnProgressDegrees
+            isGivenUp = true
+        EndIf
+    EndWhile
+    turnerAlias.Clear()
+    companion.EvaluatePackage()
+    _isTurning = false
+    If isGivenUp
+        companion.SetAngle(companion.GetAngleX(), companion.GetAngleY(), heading)
+        Return false
+    EndIf
+    Return true
 EndFunction
 
 ; -------------------------------------------------------------------- pick up
@@ -3884,7 +4023,7 @@ EndFunction
 ; over to someone to speak, getting on its horse, or riding somewhere. The server lets the next command of a chain
 ; wait until this is over
 bool Function IsBusy()
-    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting
+    If _walkTarget || _isSayDelayed || _isMounting || _isDismounting || _isTurning
         Return true
     EndIf
     If !_rideTarget
@@ -5451,6 +5590,10 @@ Function EndWalk()
     _walkNumber += 1
     _isRunWanted = false
     StopRunning()
+    ; A walk that is still going on is broken off (see OnWalkStopRequested). A walk to a seat is done by a package
+    If _walkTarget && !_isSitWalk
+        SendModEvent(EVENT_WALK_STOP, "", _walkNumber as float)
+    EndIf
     _walkTarget = None
     _walkShownTarget = None
     _isSitWalk = false
@@ -5462,6 +5605,31 @@ Function EndWalk()
     _lootItem = None
     _walkRestartCount = 0
 EndFunction
+
+; Raised by EndWalk for a walk that was still going on. numArg is the number of the walks after it was ended: if a
+; new walk has begun in the meantime, that one breaks the old walk off by itself, and this must not break off the new one.
+; Without this a companion that was told to wait in the middle of a walk went on to where it was walking
+Event OnWalkStopRequested(string eventName, string strArg, float numArg, Form sender)
+    Actor companion = GetCompanion()
+    If !companion || (numArg as int) != _walkNumber || _walkTarget || !companion.Is3DLoaded() || companion.IsOnMount()
+        Return
+    EndIf
+    If !_stopMarker
+        Form markerBase = Game.GetForm(XMarkerFormId)
+        If markerBase
+            _stopMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
+    If !_stopMarker
+        Return
+    EndIf
+    _stopMarker.MoveTo(companion)
+    ; The companion is there already, so this comes back at once, and the walk before it is over
+    companion.PathToReference(_stopMarker, WalkSpeed)
+    If (numArg as int) == _walkNumber && !_walkTarget
+        companion.EvaluatePackage()
+    EndIf
+EndEvent
 
 ; ----------------------------------------------------------------------- flee
 ; flee: the companion becomes cowardly, which is how the game makes a character keep out of fights and run from enemies
