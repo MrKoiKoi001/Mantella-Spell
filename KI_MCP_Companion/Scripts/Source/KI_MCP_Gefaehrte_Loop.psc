@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 17 AutoReadOnly
+int Property ProtocolNumber = 19 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -576,6 +576,50 @@ string Property ACTION_SNEAK = "sneak" AutoReadOnly
 string Property ACTION_PASSIVE = "passive" AutoReadOnly
 string Property PASSIVE_OFF = "off" AutoReadOnly
 string Property AggressionValue = "Aggression" AutoReadOnly
+; attack with the detail "hold": the companion stays where it stands and fights from there. The game runs a fight
+; by itself; the only say a mod has is a package made from the game's template HoldPosition that overrides combat.
+; Such a package hangs on the alias "Holder" of the hold quest. It names the alias "Spot" (a marker nobody sees,
+; put where the companion stands) and a small radius as the place to stay at. The game only keeps a character there
+; that has something that reaches far (bow, crossbow, staff, spell): one without runs to its target all the same.
+; The quest has a higher priority than the follower quest of the game, whose own package of that kind keeps a
+; follower near the player in a fight. The state tells "companion_holding" while the companion holds its spot
+string Property ATTACK_HOLD = "hold" AutoReadOnly
+int Property HoldQuestFormId = 0x0000081B AutoReadOnly
+int Property HoldAliasHolder = 0 AutoReadOnly
+int Property HoldAliasSpot = 1 AutoReadOnly
+; What GetEquippedItemType tells for a hand that holds something that reaches far
+int Property ItemTypeBow = 7 AutoReadOnly
+int Property ItemTypeStaff = 8 AutoReadOnly
+int Property ItemTypeSpell = 9 AutoReadOnly
+int Property ItemTypeCrossbow = 12 AutoReadOnly
+; cover: the companion runs to a spot none of its enemies can see and keeps to it, like after attack with "hold"
+; (same marker, same quest). The plugin finds the spot (see RequestCover in KI_MCP_Gefaehrte_Native.psc): within
+; CoverRadiusMeters, at least CoverEnemyMeters away from every enemy. The search runs on the main thread of the game,
+; so the script asks for its result every CoverResultWaitSeconds, at most CoverResultTries times.
+; While the companion stands in its cover the follow watch asks the plugin once a second whether it was hit or an
+; enemy that sees it came closer than CoverNearMeters. Then it runs to the next cover by itself and the AI is told,
+; but not more often than every CoverMoveSeconds and at most CoverMoveLimit times per command.
+; The state tells "companion_covering" while it keeps to a cover
+string Property ACTION_COVER = "cover" AutoReadOnly
+int Property NativeVersionWithCover = 27 AutoReadOnly
+int Property CoverRadiusMeters = 14 AutoReadOnly
+int Property CoverEnemyMeters = 4 AutoReadOnly
+int Property CoverNearMeters = 6 AutoReadOnly
+float Property CoverResultWaitSeconds = 0.1 AutoReadOnly
+int Property CoverResultTries = 20 AutoReadOnly
+float Property CoverMoveSeconds = 6.0 AutoReadOnly
+int Property CoverMoveLimit = 4 AutoReadOnly
+; What the plugin tells about a search: the places in its list, and what the first number means
+int Property CoverValueCount = 5 AutoReadOnly
+int Property CoverPlaceOfResult = 0 AutoReadOnly
+int Property CoverPlaceOfEast = 1 AutoReadOnly
+int Property CoverPlaceOfNorth = 2 AutoReadOnly
+int Property CoverPlaceOfHeight = 3 AutoReadOnly
+int Property CoverPlaceOfEnemies = 4 AutoReadOnly
+int Property CoverResultFound = 1 AutoReadOnly
+int Property CoverResultHere = 2 AutoReadOnly
+int Property CoverResultNone = 0 AutoReadOnly
+int Property CoverResultNoEnemy = -1 AutoReadOnly
 string Property SNEAK_ON = "on" AutoReadOnly
 string Property SNEAK_OFF = "off" AutoReadOnly
 int Property SneakModeAuto = 0 AutoReadOnly
@@ -1144,6 +1188,21 @@ int _runningMismatchCount = 0
 bool _isPassive = false
 Actor _passiveActor
 float _aggressionBefore = 0.0
+; attack with "hold": whether the companion holds a spot, who holds it, and the marker at that spot
+bool _isHolding = false
+Actor _holdActor
+Quest _holdQuest
+ObjectReference _holdMarker
+; cover: whether the spot the companion holds is a cover, whether the command found one, whether the walk that is
+; going on leads to a cover, whether the plugin has not looked at this cover yet, how often the companion changed
+; its cover by itself, when it did so last, and whether the AI was told that it stays put from now on
+bool _isCovering = false
+bool _isCoverOk = false
+bool _isCoverWalk = false
+bool _isCoverFresh = false
+int _coverMoveCount = 0
+float _coverMovedAt = 0.0
+bool _isCoverStayTold = false
 bool _isQuickStateOff = false
 bool _isSlowStateWanted = false
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
@@ -1611,6 +1670,12 @@ int Function BuildState()
         If _isPassive && _passiveActor == companion
             SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
         EndIf
+        If _isHolding && _holdActor == companion
+            SKSE_HTTP.setInt(stateHandle, "companion_holding", 1)
+            If _isCovering
+                SKSE_HTTP.setInt(stateHandle, "companion_covering", 1)
+            EndIf
+        EndIf
         int[] ownValues = BuildCompanionValues(companion, player, companionTarget)
         companionSitState = ownValues[12]
         SKSE_HTTP.setIntArray(stateHandle, "companion", ownValues)
@@ -1904,6 +1969,12 @@ int Function BuildQuickState()
     EndIf
     If companion && _isPassive && _passiveActor == companion
         SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
+    EndIf
+    If companion && _isHolding && _holdActor == companion
+        SKSE_HTTP.setInt(stateHandle, "companion_holding", 1)
+        If _isCovering
+            SKSE_HTTP.setInt(stateHandle, "companion_covering", 1)
+        EndIf
     EndIf
 
     ; Only when the server asked for it, as in BuildState: levels and skills, the things close to the viewer,
@@ -3357,6 +3428,15 @@ int Function RunCommand(int commandHandle, string actionName)
             isOk = true
             resultText = StartMakingRoom(companion, roomMarker, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 0), SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_LOW, 0), SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, ""))
         EndIf
+    ElseIf actionName == ACTION_COVER
+        resultText = GetHoldProblem(companion)
+        If resultText == "" && _nativeVersion < NativeVersionWithCover
+            resultText = "Looking for cover needs a newer plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version " + NativeVersionWithCover + ") than the one that is installed."
+        EndIf
+        If resultText == ""
+            resultText = StartCover(companion)
+            isOk = _isCoverOk
+        EndIf
     Else
         ; A character, or for move_to, enter, loot and sit also a thing in the world
         ObjectReference target = None
@@ -3401,6 +3481,11 @@ int Function RunCommand(int commandHandle, string actionName)
                 resultText = GetTradeProblem(companion, target, tradeItem, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1), actionName == ACTION_BUY)
             EndIf
         EndIf
+        ; attack with "hold": the companion stays where it stands and fights from there
+        bool isHoldAttack = actionName == ACTION_ATTACK && SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "") == ATTACK_HOLD
+        If resultText == "" && isHoldAttack
+            resultText = GetHoldProblem(companion)
+        EndIf
         If resultText == ""
             isOk = true
             ; A loot that gets cut short had made the companion wait, although it was following the player
@@ -3434,6 +3519,8 @@ int Function RunCommand(int commandHandle, string actionName)
                 resultText = StartMoveTo(companion, target, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1))
             ElseIf actionName == ACTION_LEAD
                 resultText = StartLeading(companion, target, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, -1))
+            ElseIf isHoldAttack
+                resultText = StartHoldAttack(companion, target as Actor)
             ElseIf isTrade
                 _tradeValues = tradeValues
                 resultText = StartTrade(companion, target as Actor, tradeItem, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_COUNT, 1), actionName == ACTION_BUY, followAgain)
@@ -3444,6 +3531,13 @@ int Function RunCommand(int commandHandle, string actionName)
                 EndIf
                 resultText = DoCommand(companion, actionName, target)
             EndIf
+        EndIf
+    EndIf
+
+    ; A command that sends the companion somewhere ends holding a spot, unless it is the one that makes it hold one
+    If isOk && _isHolding && IsHoldEndingAction(actionName)
+        If actionName != ACTION_ATTACK || SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "") != ATTACK_HOLD
+            EndHold()
         EndIf
     EndIf
 
@@ -3486,7 +3580,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE
         Return true
     EndIf
-    If actionName == ACTION_RELEASE_HORSE || actionName == ACTION_SNEAK || actionName == ACTION_PASSIVE
+    If actionName == ACTION_RELEASE_HORSE || actionName == ACTION_SNEAK || actionName == ACTION_PASSIVE || actionName == ACTION_COVER
         Return true
     EndIf
     If actionName == ACTION_LEAD || actionName == ACTION_AUTO_HEAL || actionName == ACTION_BUY || actionName == ACTION_SELL
@@ -4545,7 +4639,9 @@ EndFunction
 
 ; Why the target of a command is not really there, as the text for the AI, or "" if it is there or the command names
 ; no target in the world. The plugin tells (see GetAbsenceReason there). The horse commands are left out: the own
-; horse may stand far away
+; horse may stand far away. So is mount with the own horse as its target: in a test the horse stood at a stable far
+; away, the game had not loaded it, and mount was refused although StartRiding brings such a horse. A horse that is
+; not the companion's own has to be there: nobody takes a horse that nobody sees
 string Function GetAbsentTargetText(int commandHandle, string actionName)
     If _nativeVersion < NativeVersionWithPresence
         Return ""
@@ -4558,6 +4654,9 @@ string Function GetAbsentTargetText(int commandHandle, string actionName)
     EndIf
     ObjectReference namedTarget = GetTargetForm(commandHandle) as ObjectReference
     If !namedTarget
+        Return ""
+    EndIf
+    If actionName == ACTION_MOUNT && namedTarget == GetClaimedHorse()
         Return ""
     EndIf
     string absence = KI_MCP_Gefaehrte_Native.GetAbsenceReason(namedTarget, Game.GetPlayer())
@@ -7297,6 +7396,8 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             CheckCatchUp()
             UpdateSneak(watched)
             UpdatePassive(watched)
+            UpdateHold(watched)
+            UpdateCover(watched)
             ; Every question to the game costs the script a picture of the game, and all of this together took about
             ; as long as the second between two rounds. So what can wait a moment longer only runs every other round
             If watchRound % 2 == 0
@@ -7433,6 +7534,251 @@ Function KeepPassive()
     If _isPassive && _passiveActor
         _passiveActor.SetActorValue(AggressionValue, 0.0)
     EndIf
+EndFunction
+
+ReferenceAlias Function GetHoldAlias(int aliasId)
+    If !_holdQuest
+        _holdQuest = Game.GetFormFromFile(HoldQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_holdQuest
+        Return None
+    EndIf
+    ; The quest starts with the game. In a save from before it existed it may not be running yet
+    If !_holdQuest.IsRunning()
+        _holdQuest.Start()
+    EndIf
+    Return _holdQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; attack with "hold": returns why the companion cannot hold its spot, or "" if it can. Makes the marker for the
+; spot when it is asked for the first time
+string Function GetHoldProblem(Actor companion)
+    If companion.IsOnMount() || IsRideWanted()
+        Return "You sit on your horse, and from the saddle you cannot hold a spot. Get off with dismount first, or attack without '" + ATTACK_HOLD + "'."
+    EndIf
+    If !GetHoldAlias(HoldAliasHolder) || !GetHoldAlias(HoldAliasSpot)
+        Return "The game mod is missing its quest for holding a spot. The mod has to be built and installed again. An attack without '" + ATTACK_HOLD + "' lets you run to the target as before."
+    EndIf
+    If !_holdMarker
+        Form markerBase = Game.GetForm(XMarkerFormId)
+        If markerBase
+            _holdMarker = companion.PlaceAtMe(markerBase)
+        EndIf
+    EndIf
+    If !_holdMarker
+        Return "The game mod could not mark the spot to hold."
+    EndIf
+    Return ""
+EndFunction
+
+bool Function IsRangedItemType(int itemType)
+    Return itemType == ItemTypeBow || itemType == ItemTypeStaff || itemType == ItemTypeSpell || itemType == ItemTypeCrossbow
+EndFunction
+
+; Whether the companion has something in a hand that reaches far (0 = the left hand, 1 = the right hand)
+bool Function HoldsRangedWeapon(Actor companion)
+    Return IsRangedItemType(companion.GetEquippedItemType(0)) || IsRangedItemType(companion.GetEquippedItemType(1))
+EndFunction
+
+; Only call this after GetHoldProblem said that it can be done. The marker goes to where the companion stands, and
+; the package of the hold quest keeps the companion there for as long as it fights
+string Function StartHoldAttack(Actor companion, Actor target)
+    ; Following someone else than the player ends as well: the companion stays at its spot after the fight
+    StopFollowingLeader()
+    ; From a cover the companion fights on from that cover, and still changes it by itself when it is attacked there
+    bool isFromCover = _isCovering && _isHolding && _holdActor == companion
+    If !isFromCover
+        _isCovering = false
+        _holdMarker.MoveTo(companion)
+        GetHoldAlias(HoldAliasSpot).ForceRefTo(_holdMarker)
+        GetHoldAlias(HoldAliasHolder).ForceRefTo(companion)
+    EndIf
+    _holdActor = companion
+    _isHolding = true
+    ; Waiting as after 'wait': a companion that follows would run back to the player as soon as the fight is over
+    SetWaiting(companion, true)
+    companion.StartCombat(target)
+    string rangeNote = ""
+    If !HoldsRangedWeapon(companion)
+        rangeNote = " You hold no bow, crossbow, staff or spell right now: if you have nothing with you that reaches that far, the game lets you run to the target all the same. Then equip a bow first."
+    EndIf
+    If isFromCover
+        Return "You attack " + target.GetDisplayName() + " from your cover and keep to it. If you are hit there or an enemy comes close, you still run to the next cover by yourself." + rangeNote
+    EndIf
+    Return "You stay where you stand and attack " + target.GetDisplayName() + " from here. You keep to this spot, in this fight and after it, until a command sends you somewhere: 'follow' brings you back to the player." + rangeNote
+EndFunction
+
+; Which commands end holding a spot: those that send the companion somewhere. Standing, speaking, turning and
+; ending the fight do not: attacked again, the companion goes on fighting from its spot
+bool Function IsHoldEndingAction(string actionName)
+    If actionName == ACTION_FOLLOW || actionName == ACTION_ATTACK || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_ENTER || actionName == ACTION_LEAD
+        Return true
+    EndIf
+    If actionName == ACTION_LOOT || actionName == ACTION_PICK_UP || actionName == ACTION_SIT || actionName == ACTION_MAKE_ROOM || actionName == ACTION_MOUNT
+        Return true
+    EndIf
+    Return actionName == ACTION_BUY || actionName == ACTION_SELL
+EndFunction
+
+; The companion no longer keeps to its spot in a fight. Costs no question to the game while it held none
+Function EndHold()
+    _isCovering = false
+    If !_isHolding
+        Return
+    EndIf
+    _isHolding = false
+    Actor holder = _holdActor
+    _holdActor = None
+    ReferenceAlias holderAlias = GetHoldAlias(HoldAliasHolder)
+    If holderAlias
+        holderAlias.Clear()
+    EndIf
+    If holder
+        holder.EvaluatePackage()
+    EndIf
+EndFunction
+
+; Called once a second by the follow watch: if another character follows the player now (or none), the one that
+; held its spot is let go. Costs no question to the game while nothing has changed
+Function UpdateHold(Actor companion)
+    If _isHolding && _holdActor != companion
+        EndHold()
+    EndIf
+EndFunction
+
+; Asks the plugin for cover and waits for what it finds. Returns the list of TakeCoverResult, or an empty list if
+; the search could not be started or the game did not answer in time
+float[] Function FindCoverSpot(Actor companion, bool mustMove)
+    float[] nothing
+    If !KI_MCP_Gefaehrte_Native.RequestCover(companion, CoverRadiusMeters, CoverEnemyMeters, mustMove)
+        Return nothing
+    EndIf
+    int tries = 0
+    While tries < CoverResultTries
+        Utility.Wait(CoverResultWaitSeconds)
+        float[] spot = KI_MCP_Gefaehrte_Native.TakeCoverResult()
+        If spot.Length >= CoverValueCount
+            Return spot
+        EndIf
+        tries += 1
+    EndWhile
+    Return nothing
+EndFunction
+
+; cover. Only call this after GetHoldProblem said that the companion can hold a spot. Sets _isCoverOk
+string Function StartCover(Actor companion)
+    _isCoverOk = false
+    float[] spot = FindCoverSpot(companion, false)
+    If spot.Length < CoverValueCount
+        Return "The game did not answer the search for cover. Try 'cover' again."
+    EndIf
+    int found = spot[CoverPlaceOfResult] as int
+    int enemyCount = spot[CoverPlaceOfEnemies] as int
+    If found == CoverResultNoEnemy
+        Return "There is no enemy around to take cover from."
+    EndIf
+    If found == CoverResultNone
+        Return "There is no spot within about " + CoverRadiusMeters + " meters that is out of sight of the " + enemyCount + " enemies around and at least " + CoverEnemyMeters + " meters away from each of them. You stay as you are. flee takes you away from them, move_to and move take you somewhere else to try again."
+    EndIf
+    If found != CoverResultFound && found != CoverResultHere
+        Return "The game mod cannot look for cover here: it does not get at the walls or at the walkable ground of this place."
+    EndIf
+    _isCoverOk = true
+    ; As for every command that sends the companion somewhere: what it was doing ends
+    TakeFollowAgain()
+    EndWalk()
+    StopFleeing()
+    StopFollowingLeader()
+    StandUp()
+    StopGesture(companion)
+    _coverMoveCount = 0
+    _isCoverStayTold = false
+    TakeCover(companion, spot)
+    If found == CoverResultHere
+        Return "You are in cover where you stand: none of the " + enemyCount + " enemies around can see you here. You keep to this spot until a command sends you somewhere ('follow' brings you back to the player). If you are hit here or an enemy that sees you comes close, you run to the next cover by yourself and are told."
+    EndIf
+    Return "You run to cover about " + ToMeters(companion.GetDistance(_holdMarker)) + " meters away, out of sight of the " + enemyCount + " enemies around, and keep to it until a command sends you somewhere ('follow' brings you back to the player). If you are hit there or an enemy that sees you comes close, you run to the next cover by yourself and are told. Your next STATE tells you if you did not get there."
+EndFunction
+
+; Makes the spot of a search the one the companion keeps to, and sends the companion there if it is not there yet
+Function TakeCover(Actor companion, float[] spot)
+    ; First into the place the companion is in, then to the spot itself
+    _holdMarker.MoveTo(companion)
+    If (spot[CoverPlaceOfResult] as int) == CoverResultFound
+        _holdMarker.SetPosition(spot[CoverPlaceOfEast], spot[CoverPlaceOfNorth], spot[CoverPlaceOfHeight])
+    EndIf
+    GetHoldAlias(HoldAliasSpot).ForceRefTo(_holdMarker)
+    GetHoldAlias(HoldAliasHolder).ForceRefTo(companion)
+    _holdActor = companion
+    _isHolding = true
+    _isCovering = true
+    _isCoverFresh = true
+    _coverMovedAt = Utility.GetCurrentRealTime()
+    ; Waiting as after 'wait': a companion that follows would run back to the player
+    SetWaiting(companion, true)
+    If (spot[CoverPlaceOfResult] as int) != CoverResultFound
+        Return
+    EndIf
+    _isCoverWalk = true
+    _isRunWanted = true
+    _walkTarget = _holdMarker
+    StartWalk()
+EndFunction
+
+; Called once a second by the follow watch. Costs no question to the game unless the companion stands in a cover:
+; then the plugin is asked whether the companion has to leave it
+Function UpdateCover(Actor companion)
+    If !_isCovering
+        Return
+    EndIf
+    If !_isHolding || _holdActor != companion || !companion
+        _isCovering = false
+        Return
+    EndIf
+    ; On its way to a cover the companion is not sent to another one
+    If _walkTarget || _nativeVersion < NativeVersionWithCover
+        Return
+    EndIf
+    bool isFirst = _isCoverFresh
+    _isCoverFresh = false
+    string threat = KI_MCP_Gefaehrte_Native.GetCoverThreat(companion, CoverNearMeters, isFirst)
+    If threat == ""
+        Return
+    EndIf
+    ; The time counts from the start of the game, so after loading a save it may lie before the last change
+    float sinceMove = Utility.GetCurrentRealTime() - _coverMovedAt
+    If sinceMove >= 0.0 && sinceMove < CoverMoveSeconds
+        Return
+    EndIf
+    ChangeCover(companion, threat)
+EndFunction
+
+; The companion was hit in its cover or an enemy came close: it runs to the next cover, and the AI is told
+Function ChangeCover(Actor companion, string threat)
+    _coverMovedAt = Utility.GetCurrentRealTime()
+    If _coverMoveCount >= CoverMoveLimit
+        If !_isCoverStayTold
+            _isCoverStayTold = true
+            AddReport("In your cover " + threat + " again, and you have changed your cover " + CoverMoveLimit + " times already. You stay where you are from now on. flee, attack and follow are yours to call.")
+        EndIf
+        Return
+    EndIf
+    float[] spot = FindCoverSpot(companion, true)
+    ; A command may have taken over while the plugin was looking
+    If !_isCovering || !_isHolding || _holdActor != companion || _walkTarget
+        Return
+    EndIf
+    If spot.Length < CoverValueCount || (spot[CoverPlaceOfResult] as int) != CoverResultFound
+        If !_isCoverStayTold
+            _isCoverStayTold = true
+            AddReport("In your cover " + threat + ", but there is no other spot around that your enemies cannot see. You stay where you are. flee, attack and follow are yours to call.")
+        EndIf
+        Return
+    EndIf
+    _coverMoveCount += 1
+    EndWalk()
+    TakeCover(companion, spot)
+    AddReport("In your cover " + threat + ", so you run to the next cover, about " + ToMeters(companion.GetDistance(_holdMarker)) + " meters away.")
 EndFunction
 
 ; Called after a save was loaded: what was forced is forced again, in case the game did not keep it
@@ -7572,7 +7918,13 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     ; server would start the next command of a chain and then blame that one for the failure
     If !isLootWalk && !isEnterWalk
         If !isRoomWalk
-            If !hasArrived && !IsCloseEnough(companion, walkTarget, shownTarget)
+            If _isCoverWalk
+                If !hasArrived && !IsCloseEnough(companion, walkTarget, shownTarget)
+                    AddFailReport("You did not reach your cover: you stopped about " + ToMeters(companion.GetDistance(walkTarget)) + " meters short of it. You hold the spot you stand on now, and your enemies may see you there.")
+                    ; The spot to keep to is where the companion stands now, not one it cannot get to
+                    walkTarget.MoveTo(companion)
+                EndIf
+            ElseIf !hasArrived && !IsCloseEnough(companion, walkTarget, shownTarget)
                 string walkName = walkTarget.GetDisplayName()
                 float walkDistance = companion.GetDistance(walkTarget)
                 If shownTarget
@@ -7592,6 +7944,7 @@ Event OnWalkRequested(string eventName, string strArg, float numArg, Form sender
     EndIf
     _walkTarget = None
     _walkShownTarget = None
+    _isCoverWalk = false
     If isLootWalk
         _isLootWalk = false
         _lootItem = None
@@ -7753,6 +8106,12 @@ Event OnWalkWatchRequested(string eventName, string strArg, float numArg, Form s
     If shownTarget
         walkName = shownTarget.GetDisplayName()
     EndIf
+    If _isCoverWalk
+        _isCoverWalk = false
+        AddFailReport("You did not get going towards your cover. You hold the spot you stand on now. Try 'cover' again, or 'follow'.")
+        walkTarget.MoveTo(companion)
+        Return
+    EndIf
     AddFailReport("You did not get going towards " + walkName + ". Try 'move_to' again, or 'follow'.")
     Debug.Notification("AI companion: did not get going towards " + walkName)
 EndEvent
@@ -7777,6 +8136,7 @@ Function EndWalk()
     _isEnterWalk = false
     _isRoomWalk = false
     _isMoveWalk = false
+    _isCoverWalk = false
     _isPickUp = false
     _isTrade = false
     _lootItem = None

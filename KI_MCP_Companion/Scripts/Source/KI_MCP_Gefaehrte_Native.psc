@@ -324,3 +324,21 @@ int[] Function GetWholeState(Actor player, Actor companion, Actor viewer, Form[]
 ; The texts that belong to the numbers GetWholeState returned last: the name of the entry of the state, a tab, the
 ; text. A list of texts (quests, places, what was heard ...) has one line per text
 string[] Function GetWholeStateTexts() global native
+
+; The three functions below exist from interface version 27 on
+
+; cover: starts a search for a spot within radiusMeters around the companion that none of its enemies can see, on
+; ground a character can walk on (the navmesh of the game), at least enemyMeters away from every enemy. mustMove: the
+; spot the companion stands on does not count. The search runs a moment later on the main thread of the game, and
+; TakeCoverResult hands out what it found. Returns whether the search could be started
+bool Function RequestCover(Actor companion, int radiusMeters, int enemyMeters, bool mustMove) global native
+
+; What the search of RequestCover found, or an empty list while it is still running. Five numbers: what came of it
+; (1 = a spot, 2 = the companion is covered where it stands, 0 = no such spot, -1 = no enemy around, -2 = the plugin
+; cannot look), x, y and z of the spot, and how many enemies it hid from
+float[] Function TakeCoverResult() global native
+
+; Why the companion should leave the cover it stands in, as the start of a sentence ("you were hit", "Bandit got too
+; close"), or "" if there is no reason: it lost health since the last call, or an enemy that sees it is closer than
+; nearMeters. isFirst: the first call for this cover, so there is no health from before to compare with
+string Function GetCoverThreat(Actor companion, int nearMeters, bool isFirst) global native

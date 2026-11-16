@@ -1,0 +1,20 @@
+FormKey: 00081B:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_HoldQuest
+Flags:
+- StartGameEnabled
+- 0x10
+Priority: 105
+NextAliasID: 2
+Aliases:
+- Name: Holder
+  Flags:
+  - Optional
+  - AllowReserved
+  CombatOverridePackageList: 00081D:KI_MCP_Gefaehrte.esp
+  VoiceTypes: Null
+- ID: 1
+  Name: Spot
+  Flags:
+  - Optional
+  - AllowReserved
+  VoiceTypes: Null
