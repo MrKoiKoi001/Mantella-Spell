@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 14 AutoReadOnly
+int Property ProtocolNumber = 15 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -590,6 +590,40 @@ int Property NativeVersionWithTrade = 20 AutoReadOnly
 int Property NativeVersionWithQuickState = 21 AutoReadOnly
 ; How many numbers GetActorNumbers returns (see there for what they are)
 int Property ActorNumberCount = 14 AutoReadOnly
+; From this version on the plugin tells whether the target of a command is really there: the game keeps characters
+; it does not show (disabled, without a body, hidden, in another place)
+int Property NativeVersionWithPresence = 22 AutoReadOnly
+; say to a character: the number of the look that character's face takes on while the companion speaks to it
+; (below 0 = none), and how strong it is. The character also keeps its eyes on the companion for that long
+string Property KEY_COMMAND_LISTENER_FACE = "companion_listener_face" AutoReadOnly
+int Property ListenerMoodStrength = 70 AutoReadOnly
+; A character the companion speaks to also turns its whole body to the companion, but only if it really stands (see
+; IsStandingIdle) and the companion is further to its side than this. Otherwise only its head turns
+float Property ListenerTurnDegrees = 30.0 AutoReadOnly
+; From this version on the plugin finds the loose things around for pick_up with 'all' (FindLooseItems), tells what a
+; character holds in one go (GetHandNames), remembers which menus were open (TakeMenuLines), and GetActorNumbers
+; returns ActorNumberCountWithSeat numbers: the last two tell whether the character rides and whether it sits
+int Property NativeVersionWithCollecting = 23 AutoReadOnly
+int Property ActorNumberCountWithSeat = 16 AutoReadOnly
+; Whether a character rides, as AddSeatToState is told it: 0 = not known, it asks the game itself
+int Property RideStateOnFoot = 1 AutoReadOnly
+int Property RideStateRiding = 2 AutoReadOnly
+; The menus that were open since the request before, for the log of the server: per menu its name, a tab and how
+; long it was open in milliseconds (see TakeMenuLines in the plugin)
+string Property KEY_MENUS = "companion_menus" AutoReadOnly
+; pick_up with several things. KEY_COMMAND_ITEMS carries ValuesPerPickUp numbers per thing then: the upper and the
+; lower half of its ref ID. KEY_COMMAND_PICK_ALL above 0 means: everything loose within that many meters around the
+; target, or around the companion without a target; KEY_COMMAND_PICK_FILTER names the kind then ("" = everything,
+; see FindLooseItems in the plugin). The companion walks to the nearest thing, bends down once and takes every
+; thing of the list that lies within PickUpReachUnits of it, then walks on to the nearest of the rest.
+; At most PickUpMaxItems things per command; the answer names at most PickUpNamedKinds different ones
+string Property KEY_COMMAND_PICK_ALL = "companion_pick_all" AutoReadOnly
+string Property KEY_COMMAND_PICK_FILTER = "companion_pick_filter" AutoReadOnly
+string Property PICK_FILTER_NO_CLUTTER = "no_clutter" AutoReadOnly
+int Property ValuesPerPickUp = 2 AutoReadOnly
+float Property PickUpReachUnits = 250.0 AutoReadOnly
+int Property PickUpMaxItems = 30 AutoReadOnly
+int Property PickUpNamedKinds = 12 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
 ; At the end it follows the player again
@@ -957,6 +991,22 @@ int _tradePrice = 0
 int _tradeDoneCount = 0
 ; buy and sell with several items: the numbers of KEY_COMMAND_ITEMS (empty = one item, _tradeItem)
 int[] _tradeValues
+; say: the character the companion speaks to at the moment, which looks at the companion for that long, and
+; whether its face was changed for it
+Actor _sayListener
+bool _isListenerFaceSet = false
+int _sayApproachListenerMood = -1
+; pick_up with several things: what is still to be picked up (None = done or gone), and what became of the rest
+ObjectReference[] _pickItems
+bool _isPickList = false
+bool _isPickListOk = false
+int _pickTakenCount = 0
+int _pickMissedCount = 0
+string[] _pickNames
+int[] _pickNameCounts
+int _pickKindCount = 0
+; Whether the companion rides, as BuildCompanionValues learned it from the plugin (see RideStateOnFoot; 0 = not known)
+int _companionRideState = 0
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
 ; It still counts as busy, so that the next command of a chain waits until it stands again
 bool _isLooting = false
@@ -1105,6 +1155,14 @@ Function SendPoll(int[] resultHandles, bool isStateWanted)
             SKSE_HTTP.setStringArray(requestHandle, KEY_EVENTS, urgentLines)
         EndIf
     EndIf
+    ; Which menus were open in the meantime. The server only writes that into its log, so that a silence can be
+    ; told apart from a lost connection afterwards
+    If _nativeVersion >= NativeVersionWithCollecting
+        string[] menuLines = KI_MCP_Gefaehrte_Native.TakeMenuLines()
+        If menuLines.Length > 0
+            SKSE_HTTP.setStringArray(requestHandle, KEY_MENUS, menuLines)
+        EndIf
+    EndIf
     If resultHandles.Length > 0
         SKSE_HTTP.setNestedDictionariesArray(requestHandle, KEY_RESULTS, resultHandles)
     EndIf
@@ -1177,6 +1235,13 @@ int Function BuildState()
     If _nativeVersion >= NativeVersionWithQuickState
         playerNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(player, None)
     EndIf
+    ; Whether the two ride and sit, for AddSeatToState further down: asked once here instead of again there
+    int playerRideState = 0
+    If playerNumbers.Length >= ActorNumberCountWithSeat
+        playerRideState = RideStateOnFoot + playerNumbers[14]
+    EndIf
+    int companionSitState = 0
+    _companionRideState = 0
     If playerNumbers.Length >= ActorNumberCount
         playerX = playerNumbers[3] as float
         playerY = playerNumbers[4] as float
@@ -1389,7 +1454,9 @@ int Function BuildState()
         If _expressionName != ""
             SetStringSafely(stateHandle, "companion_expression", _expressionName)
         EndIf
-        SKSE_HTTP.setIntArray(stateHandle, "companion", BuildCompanionValues(companion, player, companionTarget))
+        int[] ownValues = BuildCompanionValues(companion, player, companionTarget)
+        companionSitState = ownValues[12]
+        SKSE_HTTP.setIntArray(stateHandle, "companion", ownValues)
     EndIf
 
     ; Gold of the player and of the companion (0 without a companion)
@@ -1422,10 +1489,10 @@ int Function BuildState()
         EndIf
     EndIf
     ; On what the player and the companion sit, and where the horse of the companion is
-    AddSeatToState(stateHandle, player, "player")
+    AddSeatToState(stateHandle, player, "player", playerValues[8], playerRideState)
     AddPlayerHorseToState(stateHandle, player)
     If companion
-        AddSeatToState(stateHandle, companion, "companion")
+        AddSeatToState(stateHandle, companion, "companion", companionSitState, _companionRideState)
         AddHorseToState(stateHandle, companion)
     EndIf
     If wantedInventory == INVENTORY_CORPSE
@@ -1510,6 +1577,9 @@ int[] Function BuildCompanionValues(Actor companion, Actor player, Actor compani
         companionNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(companion, player)
     EndIf
     bool isQuick = companionNumbers.Length >= ActorNumberCount
+    If companionNumbers.Length >= ActorNumberCountWithSeat
+        _companionRideState = RideStateOnFoot + companionNumbers[14]
+    EndIf
     bool isToldToWait = false
     If isQuick
         companionValues[0] = companionNumbers[0]
@@ -1726,6 +1796,14 @@ EndFunction
 ; What the companion holds: always two texts, "R:" and "L:" followed by the name of what is in that hand (nothing = empty hand).
 ; A shield counts as the left hand. A weapon for both hands is only named for the right hand
 Function AddHandsToState(int stateHandle, Actor companion)
+    ; The plugin answers this in one go
+    If _nativeVersion >= NativeVersionWithCollecting
+        string[] handNames = KI_MCP_Gefaehrte_Native.GetHandNames(companion)
+        If handNames.Length == 2
+            SKSE_HTTP.setStringArray(stateHandle, "hands", handNames)
+            Return
+        EndIf
+    EndIf
     Form rightHand = companion.GetEquippedObject(HandRight)
     Form leftHand = companion.GetEquippedObject(HandLeft)
     If !leftHand
@@ -2326,6 +2404,11 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
+    ; A target the game keeps but does not show is no target (see GetAbsentTargetText)
+    string absentText = ""
+    If companion && IsKnownAction(actionName)
+        absentText = GetAbsentTargetText(commandHandle, actionName)
+    EndIf
     ; give and take with several items carry them as a list of numbers (see KEY_COMMAND_ITEMS)
     int[] handOverValues
     If actionName == ACTION_GIVE || actionName == ACTION_TAKE
@@ -2337,6 +2420,8 @@ int Function RunCommand(int commandHandle, string actionName)
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
         resultText = "Your character is dead."
+    ElseIf absentText != ""
+        resultText = absentText
     ElseIf IsRideWanted() && (actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_WAIT || actionName == ACTION_FOLLOW)
         ; In the saddle these mean: ride there, stay here, ride after someone
         resultText = DoRideMove(companion, actionName, commandHandle)
@@ -2546,6 +2631,7 @@ int Function RunCommand(int commandHandle, string actionName)
             bool isQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
             MakeSayNoise(companion, GetSayNoise(commandHandle))
             StartSayFace(companion, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1), isQuiet)
+            StartListening(companion, _sayLookTarget as Actor, SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_LISTENER_FACE, -1))
             If IsStandingAround(companion)
                 TurnToSayTarget(companion)
                 PlaySayAnimation(companion, commandHandle)
@@ -2728,12 +2814,24 @@ int Function RunCommand(int commandHandle, string actionName)
         If _nativeVersion >= NativeVersionWithRays
             arrowName = KI_MCP_Gefaehrte_Native.GetRestingArrowName(pickHigh, pickLow)
         EndIf
-        If arrowName == ""
-            resultText = GetPickUpProblem(companion, pickTarget, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""))
-        EndIf
-        If resultText == ""
-            isOk = true
-            resultText = StartPickUp(companion, pickTarget, arrowName, pickHigh, pickLow)
+        int pickAllMeters = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_PICK_ALL, 0)
+        int[] pickListValues = SKSE_HTTP.getIntArray(commandHandle, KEY_COMMAND_ITEMS)
+        If pickAllMeters > 0
+            ; Everything loose around the target, or around the companion
+            resultText = StartCollecting(companion, pickTarget, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""), pickAllMeters, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_PICK_FILTER, ""))
+            isOk = _isPickListOk
+        ElseIf pickListValues.Length >= ValuesPerPickUp
+            ; Several things the AI named
+            resultText = StartPickUpNamed(companion, pickListValues)
+            isOk = _isPickListOk
+        Else
+            If arrowName == ""
+                resultText = GetPickUpProblem(companion, pickTarget, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TARGET, ""))
+            EndIf
+            If resultText == ""
+                isOk = true
+                resultText = StartPickUp(companion, pickTarget, arrowName, pickHigh, pickLow)
+            EndIf
         EndIf
     ElseIf actionName == ACTION_MAKE_ROOM
         ; The server sends the direction as a number in the count (see RoomDirection...), how far in meters where loot
@@ -3786,6 +3884,7 @@ string Function StartSayApproach(Actor companion, int commandHandle, Topic sayTo
     _sayApproachTarget = target
     _sayApproachTopic = sayTopic
     _sayApproachMood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_FACE, -1)
+    _sayApproachListenerMood = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_LISTENER_FACE, -1)
     _isSayApproachQuiet = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_QUIET, 0) != 0
     _sayApproachNoise = GetSayNoise(commandHandle)
     _sayApproachTalk = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_TALK, "")
@@ -3848,6 +3947,7 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     HoldTalkLook(companion, target)
     MakeSayNoise(companion, _sayApproachNoise)
     StartSayFace(companion, _sayApproachMood, _isSayApproachQuiet)
+    StartListening(companion, target as Actor, _sayApproachListenerMood)
     PlayTalkAnimation(companion, _sayApproachTalk, _sayApproachIdleHigh, _sayApproachIdleLow)
     ; The server's say_end came too early for this sentence, so the end is waited for here.
     ; The game turns a character that speaks towards the player (Say of Skyrim knows nobody else to speak to).
@@ -3878,9 +3978,87 @@ Event OnSayApproachRequested(string eventName, string strArg, float numArg, Form
     EndIf
 EndEvent
 
+; say to a character: that character keeps its eyes on the companion while the companion speaks to it, and its face
+; takes on the look the server picked for how the companion speaks (mood below 0 = its face stays as it is).
+; Only the head and the face: the character goes on with what it is doing. Not the player, and nobody who is dead,
+; asleep or fighting
+Function StartListening(Actor companion, Actor listener, int mood)
+    StopListening()
+    If !listener || listener == companion || listener == Game.GetPlayer()
+        Return
+    EndIf
+    If listener.IsDead() || listener.IsInCombat() || !listener.Is3DLoaded() || listener.GetSleepState() != 0
+        Return
+    EndIf
+    listener.SetLookAt(companion)
+    _sayListener = listener
+    ; The whole body only turns if the listener really stands. Someone who walks, sits or works keeps at it and
+    ; only turns the head. The game has no turn for other characters that scripts could start, so this is a jolt
+    If IsStandingIdle(listener)
+        float offDegrees = listener.GetHeadingAngle(companion)
+        If offDegrees > ListenerTurnDegrees || offDegrees < -ListenerTurnDegrees
+            listener.SetAngle(listener.GetAngleX(), listener.GetAngleY(), listener.GetAngleZ() + offDegrees)
+        EndIf
+    EndIf
+    If mood >= 0 && mood <= HighestMood
+        listener.SetExpressionOverride(mood, ListenerMoodStrength)
+        _isListenerFaceSet = true
+    EndIf
+EndFunction
+
+; Whether a character stands around with nothing to do: not riding, not sitting or using furniture, not in a
+; scene, not talking to the player, and not on its way somewhere
+bool Function IsStandingIdle(Actor someone)
+    If someone.IsOnMount() || someone.GetSitState() != 0 || someone.GetFurnitureReference()
+        Return false
+    EndIf
+    If someone.GetCurrentScene() || someone.IsInDialogueWithPlayer()
+        Return false
+    EndIf
+    Return someone.GetAnimationVariableFloat(SpeedVariable) < StandingSpeedLimit
+EndFunction
+
+; The sentence is over: the eyes and the face of whom the companion spoke to are its own again
+Function StopListening()
+    Actor listener = _sayListener
+    _sayListener = None
+    If listener
+        listener.ClearLookAt()
+        If _isListenerFaceSet
+            listener.ClearExpressionOverride()
+        EndIf
+    EndIf
+    _isListenerFaceSet = false
+EndFunction
+
+; Why the target of a command is not really there, as the text for the AI, or "" if it is there or the command names
+; no target in the world. The plugin tells (see GetAbsenceReason there). The horse commands are left out: the own
+; horse may stand far away
+string Function GetAbsentTargetText(int commandHandle, string actionName)
+    If _nativeVersion < NativeVersionWithPresence
+        Return ""
+    EndIf
+    If actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE || actionName == ACTION_RELEASE_HORSE
+        Return ""
+    EndIf
+    If SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_HIGH, 0) == 0 && SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_TARGET_LOW, 0) == 0
+        Return ""
+    EndIf
+    ObjectReference namedTarget = GetTargetForm(commandHandle) as ObjectReference
+    If !namedTarget
+        Return ""
+    EndIf
+    string absence = KI_MCP_Gefaehrte_Native.GetAbsenceReason(namedTarget, Game.GetPlayer())
+    If absence == ""
+        Return ""
+    EndIf
+    Return namedTarget.GetDisplayName() + " " + absence + ". Nobody can see it there, so you cannot do anything with it. Do not speak of it to the player as if it stood there."
+EndFunction
+
 ; The sentence is over: the eyes go back to what look_at holds (or are free again), the face is the companion's own
 ; again, and it stands normally again, because some of the animations for talking stay as a pose otherwise
 Function ReleaseSay(Actor companion)
+    StopListening()
     If _sayLookTarget
         _sayLookTarget = None
         HoldTalkLook(companion, None)
@@ -4716,6 +4894,303 @@ Function FinishPickUp(Actor companion, ObjectReference itemRef)
     AddReport("You picked up " + itemName + ".")
 EndFunction
 
+; pick_up with several things the AI named (see ValuesPerPickUp). What cannot be picked up is left out and told.
+; Returns the text for the AI, _isPickListOk tells whether the companion set off
+string Function StartPickUpNamed(Actor companion, int[] pickListValues)
+    _isPickListOk = false
+    ObjectReference[] namedItems = new ObjectReference[30]
+    int namedCount = 0
+    int refusedCount = 0
+    string firstProblem = ""
+    string namedProblem = ""
+    ObjectReference namedItem
+    int valuePlace = 0
+    While valuePlace + 1 < pickListValues.Length && namedCount < PickUpMaxItems
+        namedItem = GetFormFromHalves(pickListValues[valuePlace], pickListValues[valuePlace + 1]) as ObjectReference
+        If namedItem
+            namedProblem = GetPickUpProblem(companion, namedItem, "")
+        Else
+            namedProblem = "Number " + (valuePlace / ValuesPerPickUp + 1) + " of your list is no thing the game has here. Take the ref_ids from 'Things' in STATE."
+        EndIf
+        If namedProblem == ""
+            namedItems[namedCount] = namedItem
+            namedCount += 1
+        Else
+            refusedCount += 1
+            If firstProblem == ""
+                firstProblem = namedProblem
+            EndIf
+        EndIf
+        valuePlace += ValuesPerPickUp
+    EndWhile
+    If namedCount == 0
+        Return "You took nothing. " + firstProblem
+    EndIf
+    string leftOutNote = ""
+    If refusedCount == 1
+        leftOutNote = " One of your list you leave out: " + firstProblem
+    ElseIf refusedCount > 1
+        leftOutNote = " " + refusedCount + " of your list you leave out. The first of them: " + firstProblem
+    EndIf
+    Return StartPickUpList(companion, namedItems, leftOutNote)
+EndFunction
+
+; pick_up with 'all': everything loose within radiusMeters around the center (nothing = around the companion) that
+; is free to take, of the kind filterName ("" = everything). The plugin finds the things (see FindLooseItems there).
+; Returns the text for the AI, _isPickListOk tells whether the companion set off
+string Function StartCollecting(Actor companion, ObjectReference center, string centerText, int radiusMeters, string filterName)
+    _isPickListOk = false
+    If _nativeVersion < NativeVersionWithCollecting
+        Return "Picking up everything around needs the newest plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version 23). Name the things one by one instead."
+    EndIf
+    If centerText != "" && !center
+        Return "There is nothing with the ref_id '" + centerText + "'. Leave the target out to pick up what lies around you."
+    EndIf
+    string aroundText = "around you"
+    If center
+        If center.IsDisabled() || !center.Is3DLoaded()
+            Return center.GetDisplayName() + " is not there any more, or too far away."
+        EndIf
+        aroundText = "around " + center.GetDisplayName()
+    EndIf
+    string kindText = ""
+    If filterName == PICK_FILTER_NO_CLUTTER
+        kindText = " that is no clutter"
+    ElseIf filterName != ""
+        kindText = " of the kind '" + filterName + "'"
+    EndIf
+    ObjectReference[] foundItems = KI_MCP_Gefaehrte_Native.FindLooseItems(companion, center, radiusMeters, filterName, PickUpMaxItems)
+    int[] leftOutNumbers = KI_MCP_Gefaehrte_Native.GetLooseItemNumbers()
+    int ownedCount = 0
+    int moreCount = 0
+    If leftOutNumbers.Length >= 2
+        ownedCount = leftOutNumbers[0]
+        moreCount = leftOutNumbers[1]
+    EndIf
+    If ownedCount < 0
+        Return "The game cannot be searched for loose things here. Name the things one by one instead."
+    EndIf
+    string leftOutNote = ""
+    If ownedCount == 1
+        leftOutNote = " One thing there belongs to someone, you leave it."
+    ElseIf ownedCount > 1
+        leftOutNote = " " + ownedCount + " things there belong to someone, you leave them."
+    EndIf
+    If foundItems.Length == 0
+        Return "You took nothing: there is nothing loose" + kindText + " within " + radiusMeters + " meters " + aroundText + " that is free to take." + leftOutNote
+    EndIf
+    If moreCount > 0
+        leftOutNote = leftOutNote + " There are " + moreCount + " more things than you take in one go: send the command again afterwards."
+    EndIf
+    Return StartPickUpList(companion, foundItems, leftOutNote)
+EndFunction
+
+; Sets the companion off to pick up every thing of the list, the nearest first. note: what is added to the answer.
+; Returns the text for the AI, _isPickListOk tells whether the companion set off
+string Function StartPickUpList(Actor companion, ObjectReference[] listedItems, string note)
+    bool followAgain = TakeFollowAgain()
+    ; This also ends a list that is still being picked up, and tells what it got
+    EndWalk()
+    StopFleeing()
+    StopFollowingLeader()
+    StandUp()
+    StopGesture(companion)
+    _isPickListOk = false
+    _pickItems = listedItems
+    _pickTakenCount = 0
+    _pickMissedCount = 0
+    _pickKindCount = 0
+    _pickNames = new string[12]
+    _pickNameCounts = new int[12]
+    int wantedCount = 0
+    int listPlace = 0
+    While listPlace < listedItems.Length
+        If listedItems[listPlace]
+            wantedCount += 1
+        EndIf
+        listPlace += 1
+    EndWhile
+    ObjectReference firstItem = GetNearestPickItem(companion)
+    If !firstItem
+        If followAgain
+            SetWaiting(companion, false)
+        EndIf
+        Return "You took nothing: none of these things is there any more." + note
+    EndIf
+    _isPickList = true
+    _pickUpHigh = 0
+    _pickUpLow = 0
+    _followAfterLoot = followAgain || !IsWaiting(companion)
+    SetWaiting(companion, true)
+    _isLootWalk = true
+    _isPickUp = true
+    _lootItem = None
+    _walkTarget = firstItem
+    StartWalk()
+    _isPickListOk = true
+    If wantedCount == 1
+        Return "You walk to " + firstItem.GetDisplayName() + " to pick it up. Your next STATE tells you whether you got it." + note
+    EndIf
+    Return "You set off to pick up " + wantedCount + " things, the nearest first: " + firstItem.GetDisplayName() + ". Your next STATE tells you what you got." + note
+EndFunction
+
+; The thing of the list that lies nearest to the companion, or None if nothing is left. What is gone in the
+; meantime (someone else took it) is struck off the list and counted
+ObjectReference Function GetNearestPickItem(Actor companion)
+    ObjectReference nearestItem
+    ObjectReference listedItem
+    float nearestUnits = 0.0
+    float listedUnits = 0.0
+    int listPlace = 0
+    While listPlace < _pickItems.Length
+        listedItem = _pickItems[listPlace]
+        If listedItem
+            If listedItem.IsDisabled() || !listedItem.Is3DLoaded()
+                _pickItems[listPlace] = None
+                _pickMissedCount += 1
+            Else
+                listedUnits = companion.GetDistance(listedItem)
+                If !nearestItem || listedUnits < nearestUnits
+                    nearestItem = listedItem
+                    nearestUnits = listedUnits
+                EndIf
+            EndIf
+        EndIf
+        listPlace += 1
+    EndWhile
+    Return nearestItem
+EndFunction
+
+; Called when a walk to a thing of the list is over (see FinishLoot). The companion bends down once and takes that
+; thing and every other one of the list that lies within PickUpReachUnits of it. Then it walks on to the nearest of
+; the rest, or tells what it got. As with a single thing, how close it got is not checked for the thing it walked to
+Function FinishPickUpList(Actor companion, ObjectReference pileItem, int ownWalkNumber)
+    If pileItem && !pileItem.IsDisabled() && CanPlayTaskAnimation(companion) && companion.GetDistance(pileItem) <= LootAnimationUnits
+        If PlayGesture(companion, Game.GetForm(PickUpIdleFormId) as Idle, PickUpEvent) != ""
+            Utility.Wait(PickUpSeconds)
+        EndIf
+    EndIf
+    If ownWalkNumber != _walkNumber || !_isPickList
+        ; A newer command has taken over while the companion bent down. It has told what was picked up so far
+        Return
+    EndIf
+    ObjectReference listedItem
+    bool isInPile = false
+    int listPlace = 0
+    While listPlace < _pickItems.Length
+        listedItem = _pickItems[listPlace]
+        If listedItem
+            isInPile = listedItem == pileItem
+            If !isInPile && pileItem && !listedItem.IsDisabled() && listedItem.Is3DLoaded()
+                isInPile = listedItem.GetDistance(pileItem) <= PickUpReachUnits
+            EndIf
+            If isInPile
+                _pickItems[listPlace] = None
+                TakeListedItem(companion, listedItem)
+            EndIf
+        EndIf
+        listPlace += 1
+    EndWhile
+    If ownWalkNumber != _walkNumber || !_isPickList
+        Return
+    EndIf
+    ObjectReference nextItem = GetNearestPickItem(companion)
+    If nextItem
+        _isLootWalk = true
+        _isPickUp = true
+        _lootItem = None
+        _walkTarget = nextItem
+        StartWalk()
+        Return
+    EndIf
+    ReportPickList(false)
+    If _followAfterLoot
+        SetWaiting(companion, false)
+    EndIf
+    _isLooting = false
+EndFunction
+
+; Moves one thing of the list into the inventory of the companion and keeps its name for the answer
+Function TakeListedItem(Actor companion, ObjectReference listedItem)
+    If listedItem.IsDisabled() || !listedItem.Is3DLoaded()
+        _pickMissedCount += 1
+        Return
+    EndIf
+    string itemName = listedItem.GetDisplayName()
+    ; See FinishPickUp for what AddItem does with a thing of the world
+    companion.AddItem(listedItem, 1, true)
+    _pickTakenCount += 1
+    int kindPlace = 0
+    While kindPlace < _pickKindCount
+        If _pickNames[kindPlace] == itemName
+            _pickNameCounts[kindPlace] = _pickNameCounts[kindPlace] + 1
+            Return
+        EndIf
+        kindPlace += 1
+    EndWhile
+    If _pickKindCount < _pickNames.Length
+        _pickNames[_pickKindCount] = itemName
+        _pickNameCounts[_pickKindCount] = 1
+        _pickKindCount += 1
+    EndIf
+EndFunction
+
+; Ends a pick_up with several things and tells the AI with its next state what became of it. wasCut: a newer
+; command came before the companion was done
+Function ReportPickList(bool wasCut)
+    If !_isPickList
+        Return
+    EndIf
+    _isPickList = false
+    int leftCount = 0
+    int listPlace = 0
+    While listPlace < _pickItems.Length
+        If _pickItems[listPlace]
+            leftCount += 1
+            _pickItems[listPlace] = None
+        EndIf
+        listPlace += 1
+    EndWhile
+    If wasCut && _pickTakenCount == 0 && _pickMissedCount == 0
+        ; Nothing happened yet. A single pick_up that is cut short says nothing either
+        Return
+    EndIf
+    string doneText = ""
+    int namedTotal = 0
+    int kindPlace = 0
+    While kindPlace < _pickKindCount
+        If _pickNameCounts[kindPlace] > 1
+            doneText = AddToList(doneText, _pickNameCounts[kindPlace] + " " + _pickNames[kindPlace])
+        Else
+            doneText = AddToList(doneText, _pickNames[kindPlace])
+        EndIf
+        namedTotal += _pickNameCounts[kindPlace]
+        kindPlace += 1
+    EndWhile
+    If _pickTakenCount > namedTotal
+        doneText = doneText + " and " + (_pickTakenCount - namedTotal) + " more things"
+    EndIf
+    string listText = "You took nothing."
+    If _pickTakenCount == 1
+        listText = "You picked up " + doneText + "."
+    ElseIf _pickTakenCount > 1
+        listText = "You picked up " + _pickTakenCount + " things: " + doneText + "."
+    EndIf
+    If _pickMissedCount == 1
+        listText = listText + " One thing was not there any more."
+    ElseIf _pickMissedCount > 1
+        listText = listText + " " + _pickMissedCount + " things were not there any more."
+    EndIf
+    If wasCut && leftCount > 0
+        listText = listText + " " + leftCount + " you left where they lie, because your next command came first."
+    EndIf
+    If _pickTakenCount > 0 || wasCut
+        AddReport(listText)
+    Else
+        AddFailReport(listText)
+    EndIf
+EndFunction
+
 ; ----------------------------------------------------------------------- loot
 ; loot: the companion walks to a dead character or to a container (a chest, a barrel ...) and takes what is in it:
 ; one kind of item or everything. The walk takes time, so the command only starts it.
@@ -4795,6 +5270,11 @@ Function FinishLoot(Actor companion, ObjectReference corpse, Form item, int ownW
     If _isPickUp
         ; The walk led to a thing that lies around (see pick_up)
         _isPickUp = false
+        If _isPickList
+            ; One of several things: the walk may go on to the next one (see FinishPickUpList)
+            FinishPickUpList(companion, corpse, ownWalkNumber)
+            Return
+        EndIf
         FinishPickUp(companion, corpse)
         If ownWalkNumber == _walkNumber
             If _followAfterLoot
@@ -5665,11 +6145,24 @@ Function AddPlayerHorseToState(int stateHandle, Actor player)
     EndIf
     KeepHorseName(playersHorse)
     int[] horseValues = new int[3]
-    horseValues[0] = playersHorse.GetFormID()
     horseValues[1] = -1
-    If playersHorse.Is3DLoaded()
-        horseValues[1] = ToMeters(playersHorse.GetDistance(player))
-        horseValues[2] = player.GetHeadingAngle(playersHorse) as int
+    ; The plugin answers this in one go (see NativeVersionWithQuickState)
+    int[] horseNumbers
+    If _nativeVersion >= NativeVersionWithQuickState
+        horseNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(playersHorse, player)
+    EndIf
+    If horseNumbers.Length >= ActorNumberCount
+        horseValues[0] = horseNumbers[0]
+        If horseNumbers[9] != 0
+            horseValues[1] = horseNumbers[10]
+            horseValues[2] = horseNumbers[11]
+        EndIf
+    Else
+        horseValues[0] = playersHorse.GetFormID()
+        If playersHorse.Is3DLoaded()
+            horseValues[1] = ToMeters(playersHorse.GetDistance(player))
+            horseValues[2] = player.GetHeadingAngle(playersHorse) as int
+        EndIf
     EndIf
     SKSE_HTTP.setIntArray(stateHandle, "player_horse", horseValues)
     SetStringSafely(stateHandle, "player_horse_name", playersHorse.GetDisplayName())
@@ -6026,9 +6519,15 @@ Function CheckRideWithPlayer()
 EndFunction
 
 ; On what a character sits: "<prefix>_mount" is the name of the horse it rides (UnknownMountName if the game mod
-; cannot tell which horse), "<prefix>_seat" the name of the furniture it sits on (left out if that has no name)
-Function AddSeatToState(int stateHandle, Actor sitter, string prefix)
-    If sitter.IsOnMount()
+; cannot tell which horse), "<prefix>_seat" the name of the furniture it sits on (left out if that has no name).
+; sitState: what GetSitState told for it, the state has asked that already. rideState: whether it rides, if the
+; plugin told (see RideStateOnFoot). So a character that neither rides nor sits costs no question to the game here
+Function AddSeatToState(int stateHandle, Actor sitter, string prefix, int sitState, int rideState)
+    bool isRiding = rideState == RideStateRiding
+    If rideState != RideStateOnFoot && rideState != RideStateRiding
+        isRiding = sitter.IsOnMount()
+    EndIf
+    If isRiding
         string mountName = UnknownMountName
         If _nativeVersion >= NativeVersionWithMount
             Actor mount = KI_MCP_Gefaehrte_Native.GetMount(sitter)
@@ -6039,7 +6538,7 @@ Function AddSeatToState(int stateHandle, Actor sitter, string prefix)
         SetStringSafely(stateHandle, prefix + "_mount", mountName)
         Return
     EndIf
-    If sitter.GetSitState() < SitStateSeated
+    If sitState < SitStateSeated
         Return
     EndIf
     ObjectReference seat = sitter.GetFurnitureReference()
@@ -6058,11 +6557,24 @@ Function AddHorseToState(int stateHandle, Actor companion)
     EndIf
     KeepHorseName(ownHorse)
     int[] horseValues = new int[5]
-    horseValues[0] = ownHorse.GetFormID()
     horseValues[1] = -1
-    If ownHorse.Is3DLoaded() && companion.Is3DLoaded()
-        horseValues[1] = ToMeters(ownHorse.GetDistance(companion))
-        horseValues[2] = companion.GetHeadingAngle(ownHorse) as int
+    ; The plugin answers this in one go (see NativeVersionWithQuickState)
+    int[] horseNumbers
+    If _nativeVersion >= NativeVersionWithQuickState
+        horseNumbers = KI_MCP_Gefaehrte_Native.GetActorNumbers(ownHorse, companion)
+    EndIf
+    If horseNumbers.Length >= ActorNumberCount
+        horseValues[0] = horseNumbers[0]
+        If horseNumbers[9] != 0 && companion.Is3DLoaded()
+            horseValues[1] = horseNumbers[10]
+            horseValues[2] = horseNumbers[11]
+        EndIf
+    Else
+        horseValues[0] = ownHorse.GetFormID()
+        If ownHorse.Is3DLoaded() && companion.Is3DLoaded()
+            horseValues[1] = ToMeters(ownHorse.GetDistance(companion))
+            horseValues[2] = companion.GetHeadingAngle(ownHorse) as int
+        EndIf
     EndIf
     horseValues[3] = ToNumber(IsRideWanted())
     horseValues[4] = ToNumber(_isRideLocked)
@@ -6667,6 +7179,10 @@ EndEvent
 ; A walk that is still running finds a new number when it comes back and then stays silent
 Function EndWalk()
     _walkNumber += 1
+    ; A pick_up with several things that is cut short tells what it got so far
+    If _isPickList
+        ReportPickList(true)
+    EndIf
     _isRunWanted = false
     StopRunning()
     ; A walk that is still going on is broken off (see OnWalkStopRequested). A walk to a seat is done by a package

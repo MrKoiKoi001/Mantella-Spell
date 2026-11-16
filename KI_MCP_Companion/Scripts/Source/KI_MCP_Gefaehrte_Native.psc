@@ -262,7 +262,8 @@ int[] Function GetTradeOffer(Actor merchant, Actor buyer, Form item, bool isBuyi
 ; The plain facts about a character. viewer: from whom the distance and the direction count (None = both stay 0).
 ; The numbers: ref ID, dead, in a fight, position x, y, z, the direction it faces in degrees, weapon drawn, sneaking,
 ; in the loaded area, distance to the viewer in meters, angle from where the viewer faces in degrees (negative =
-; left), ref ID of whom it fights (0 = nobody), told to wait by the player
+; left), ref ID of whom it fights (0 = nobody), told to wait by the player, and from interface version 23 on:
+; rides, sits on something (seated or about to get up; a rider counts as seated too)
 int[] Function GetActorNumbers(Actor character, Actor viewer) global native
 
 ; The characters around the viewer, living and dead, without the player and the companion, at most maxCharacters
@@ -274,3 +275,33 @@ int[] Function GetNearbyValues(Actor viewer, Actor companion, int radiusMeters, 
 
 ; The names of the characters GetNearbyValues listed last: the place in that list, a colon and the name
 string[] Function GetNearbyNames() global native
+
+; The function below exists from interface version 22 on
+
+; Why a character or a thing is not really there, as the end of a sentence ("is hidden: the game does not draw it"),
+; or "" if it is there. The game keeps characters it does not show: disabled ones, ones without a body, hidden ones,
+; ones in another place than the viewer. For a thing only "disabled" and "being deleted" count. What the plugin
+; found also goes into its log file
+string Function GetAbsenceReason(ObjectReference target, Actor viewer) global native
+
+; The four functions below exist from interface version 23 on
+
+; Which menus were opened and closed again since the last call, oldest first: the name the game gives the menu, a tab
+; and how long it was open in milliseconds. What the game shows all the time (the HUD, the cursor) is left out.
+; The plugin forgets them once it has handed them out
+string[] Function TakeMenuLines() global native
+
+; What a character holds: always two texts, "R:" and "L:" followed by the name of what is in that hand (nothing =
+; empty hand). A shield counts as the left hand. A weapon for both hands is only named for the right hand
+string[] Function GetHandNames(Actor holder) global native
+
+; The loose things a companion may collect within radiusMeters around the center (None = around the companion), the
+; ones nearest to the companion first, at most maxItems. filterName: "" for everything, "no_clutter" for everything
+; but plates, tankards and the like, or one kind: potions, food, ingredients, weapons, armor, ammo, books, scrolls,
+; keys, gold, misc. Left out: what belongs to someone, what has no name, lights that cannot be carried, arrows that
+; were shot, and what lies on another floor
+ObjectReference[] Function FindLooseItems(Actor companion, ObjectReference center, int radiusMeters, string filterName, int maxItems) global native
+
+; What the last FindLooseItems left out: how many things that belong to someone (-1 = it could not look at all), and
+; how many more it found than it was allowed to return
+int[] Function GetLooseItemNumbers() global native
