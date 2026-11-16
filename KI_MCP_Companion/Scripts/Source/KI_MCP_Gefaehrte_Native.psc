@@ -305,3 +305,19 @@ ObjectReference[] Function FindLooseItems(Actor companion, ObjectReference cente
 ; What the last FindLooseItems left out: how many things that belong to someone (-1 = it could not look at all), and
 ; how many more it found than it was allowed to return
 int[] Function GetLooseItemNumbers() global native
+
+; The two functions below exist from interface version 24 on
+
+; What goes along with every state, collected in one go, because a script waits for the next picture of the game with
+; nearly every question it asks. Returns a list of numbers: first a few for the script (see StateHead... in
+; KI_MCP_Gefaehrte_Loop.psc), then one block per list of the state: which list, how many numbers, the numbers
+; (the two times, player, world, companion, gold, the horses, the characters around). The texts that belong to it
+; come from GetWholeStateTexts. The companion server unpacks both (expand_quick_state in game_state.py).
+; viewer: from whom the lists are seen. ownForms and options: what only the script knows, at the places
+; StateForm... and StateOption... name. namedHorses and horseNames: the horses the script gave a name, and the names.
+; An empty list means: the plugin cannot build this state, and it has not touched anything
+int[] Function GetWholeState(Actor player, Actor companion, Actor viewer, Form[] ownForms, int[] options, Form[] namedHorses, string[] horseNames) global native
+
+; The texts that belong to the numbers GetWholeState returned last: the name of the entry of the state, a tab, the
+; text. A list of texts (quests, places, what was heard ...) has one line per text
+string[] Function GetWholeStateTexts() global native

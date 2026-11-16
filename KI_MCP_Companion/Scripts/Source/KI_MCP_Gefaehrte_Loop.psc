@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 15 AutoReadOnly
+int Property ProtocolNumber = 16 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -624,6 +624,92 @@ int Property ValuesPerPickUp = 2 AutoReadOnly
 float Property PickUpReachUnits = 250.0 AutoReadOnly
 int Property PickUpMaxItems = 30 AutoReadOnly
 int Property PickUpNamedKinds = 12 AutoReadOnly
+; From this version on the plugin answers what goes along with every state in one go (GetWholeState, see there):
+; a list of numbers and a list of texts (GetWholeStateTexts), which go to the server under these two names. The
+; server unpacks them into the entries the state always had. What the plugin cannot tell, this script asks the game
+; as before and hands in (see BuildQuickState). The places in the lists below are the same as in plugin.cpp
+; (STATE_OPTION_..., STATE_FORM_..., STATE_HEAD_...) and must be kept the same there
+int Property NativeVersionWithWholeState = 24 AutoReadOnly
+string Property KEY_QUICK_NUMBERS = "quick_numbers" AutoReadOnly
+string Property KEY_QUICK_TEXTS = "quick_texts" AutoReadOnly
+int Property StateOptionProtocol = 0 AutoReadOnly
+int Property StateOptionListLimit = 1 AutoReadOnly
+int Property StateOptionMute = 2 AutoReadOnly
+int Property StateOptionHearing = 3 AutoReadOnly
+int Property StateOptionPlayerHealth = 4 AutoReadOnly
+int Property StateOptionPlayerSitState = 5 AutoReadOnly
+int Property StateOptionPlayerSleepState = 6 AutoReadOnly
+int Property StateOptionCompanionHealth = 7 AutoReadOnly
+int Property StateOptionCompanionSitState = 8 AutoReadOnly
+int Property StateOptionCompanionRuns = 9 AutoReadOnly
+int Property StateOptionRideHold = 10 AutoReadOnly
+int Property StateOptionFleeing = 11 AutoReadOnly
+int Property StateOptionKeepsWeaponAway = 12 AutoReadOnly
+int Property StateOptionSneakMode = 13 AutoReadOnly
+int Property StateOptionAutoHealPercent = 14 AutoReadOnly
+int Property StateOptionLeadState = 15 AutoReadOnly
+int Property StateOptionRideLocked = 16 AutoReadOnly
+int Property StateOptionMaxQuests = 17 AutoReadOnly
+int Property StateOptionMaxQuestTargets = 18 AutoReadOnly
+int Property StateOptionPlaceRadius = 19 AutoReadOnly
+int Property StateOptionMaxPlaceMarkers = 20 AutoReadOnly
+int Property StateOptionMaxPlaceDoors = 21 AutoReadOnly
+int Property StateOptionTrapRadius = 22 AutoReadOnly
+int Property StateOptionMaxTraps = 23 AutoReadOnly
+int Property StateOptionMaxHeardLines = 24 AutoReadOnly
+int Property StateOptionMaxEventLines = 25 AutoReadOnly
+int Property StateOptionIndoorRadius = 26 AutoReadOnly
+int Property StateOptionOutdoorRadius = 27 AutoReadOnly
+int Property StateOptionAliasRider = 28 AutoReadOnly
+int Property StateOptionAliasHorse = 29 AutoReadOnly
+int Property StateOptionAliasPlayerHorse = 30 AutoReadOnly
+int Property StateOptionAliasCalledHorse = 31 AutoReadOnly
+int Property StateFormWalkTarget = 0 AutoReadOnly
+int Property StateFormRideTarget = 1 AutoReadOnly
+int Property StateFormLookTarget = 2 AutoReadOnly
+int Property StateFormLeader = 3 AutoReadOnly
+int Property StateFormRideLeader = 4 AutoReadOnly
+int Property StateFormHorseQuest = 5 AutoReadOnly
+int Property StateFormPlayerHorseQuest = 6 AutoReadOnly
+int Property StateFormHorseCallQuest = 7 AutoReadOnly
+; The first numbers of what GetWholeState returns are for this script: how many of them there are, whether the
+; player and the companion ride, and whether a horse has lost the name this script gave it
+int Property StateHeadLength = 0 AutoReadOnly
+int Property StateHeadPlayerRides = 1 AutoReadOnly
+int Property StateHeadCompanionRides = 2 AutoReadOnly
+int Property StateHeadPlayerHorseNameLost = 3 AutoReadOnly
+int Property StateHeadOwnHorseNameLost = 4 AutoReadOnly
+int Property StateHeadCount = 5 AutoReadOnly
+; Behind them comes the block of the two times: its number, how many (2), then the times. This script writes how
+; long the whole state took into the first of them
+int Property StateTimeOffset = 2 AutoReadOnly
+; report_state: what the state should carry, as one list of numbers instead of one entry each, because every entry
+; this script reads costs it a picture of the game. Servers from protocol 16 on send both. The flags at the end tell
+; whether the texts that belong to it are worth reading at all
+string Property KEY_COMMAND_STATE_OPTIONS = "companion_state_options" AutoReadOnly
+int Property WantedOptionListLimit = 0 AutoReadOnly
+int Property WantedOptionThings = 1 AutoReadOnly
+int Property WantedOptionAround = 2 AutoReadOnly
+int Property WantedOptionStats = 3 AutoReadOnly
+int Property WantedOptionVisible = 4 AutoReadOnly
+int Property WantedOptionSpace = 5 AutoReadOnly
+int Property WantedOptionSpaceMeters = 6 AutoReadOnly
+int Property WantedOptionSpaceDegrees = 7 AutoReadOnly
+int Property WantedOptionSpaceFacing = 8 AutoReadOnly
+int Property WantedOptionSpaceAngle = 9 AutoReadOnly
+int Property WantedOptionReadHigh = 10 AutoReadOnly
+int Property WantedOptionReadLow = 11 AutoReadOnly
+int Property WantedOptionReadPage = 12 AutoReadOnly
+int Property WantedOptionMute = 13 AutoReadOnly
+; 1 = build this state the old way, question by question (the server compares the two ways with it)
+int Property WantedOptionSlow = 14 AutoReadOnly
+int Property WantedOptionTargetHigh = 15 AutoReadOnly
+int Property WantedOptionTargetLow = 16 AutoReadOnly
+int Property WantedOptionHasInventory = 17 AutoReadOnly
+int Property WantedOptionHasFind = 18 AutoReadOnly
+int Property WantedOptionHasFilter = 19 AutoReadOnly
+int Property WantedOptionHasRead = 20 AutoReadOnly
+int Property WantedOptionCount = 21 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
 ; At the end it follows the player again
@@ -1007,6 +1093,11 @@ int[] _pickNameCounts
 int _pickKindCount = 0
 ; Whether the companion rides, as BuildCompanionValues learned it from the plugin (see RideStateOnFoot; 0 = not known)
 int _companionRideState = 0
+; The state in one go (see NativeVersionWithWholeState): whether the last try worked, whether it is switched off
+; until the game is loaded again because it failed, and whether the server asked for the old way this time
+bool _isQuickStateOk = false
+bool _isQuickStateOff = false
+bool _isSlowStateWanted = false
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
 ; It still counts as busy, so that the next command of a chain waits until it stands again
 bool _isLooting = false
@@ -1025,6 +1116,7 @@ EndEvent
 
 ; Called by KI_MCP_Gefaehrte_PlayerAlias. Registrations for mod events do not survive loading a save
 Function OnGameLoaded()
+    _isQuickStateOff = false
     StartLoop()
     KeepHorseNames()
     KeepHorseOwner()
@@ -1149,7 +1241,7 @@ Function SendPoll(int[] resultHandles, bool isStateWanted)
     EndIf
     ; What cannot wait until the AI asks for the state: a fight that begins, someone who dies. The server hangs
     ; it onto its next answer to the AI. A state that goes along has taken these already (see BuildState)
-    If _nativeVersion >= NativeVersionWithEvents
+    If !isStateWanted && _nativeVersion >= NativeVersionWithEvents
         string[] urgentLines = KI_MCP_Gefaehrte_Native.TakeUrgentEvents()
         If urgentLines.Length > 0
             SKSE_HTTP.setStringArray(requestHandle, KEY_EVENTS, urgentLines)
@@ -1178,6 +1270,15 @@ EndFunction
 ; (src/companion/game_state.py in the Mantella fork). The order of the numbers has to match that file
 
 int Function BuildState()
+    ; The plugin answers what goes along with every state in one go, if it is new enough and nothing is asked for
+    ; that only the way below can do. If that does not work out, the way below builds the state as it always did
+    If CanBuildQuickState()
+        int quickHandle = BuildQuickState()
+        If _isQuickStateOk
+            Return quickHandle
+        EndIf
+    EndIf
+    _isSlowStateWanted = false
     float startTime = Utility.GetCurrentRealTime()
     Actor player = Game.GetPlayer()
     Cell playerCell = player.GetParentCell()
@@ -1558,6 +1659,217 @@ int Function BuildState()
     timeValues[0] = ((endTime - startTime) * 1000.0) as int
     timeValues[1] = ((endTime - scanStartTime) * 1000.0) as int
     SKSE_HTTP.setIntArray(stateHandle, "times_ms", timeValues)
+    Return stateHandle
+EndFunction
+
+; Whether the state can be built in one go by the plugin (see BuildQuickState). Rays around the companion and
+; "only what can be seen" are rare and stay with the old way
+bool Function CanBuildQuickState()
+    If _nativeVersion < NativeVersionWithWholeState || _isQuickStateOff || _isSlowStateWanted
+        Return false
+    EndIf
+    Return !_wantedSpace && !_wantedVisible
+EndFunction
+
+; The state, built in one go: the plugin collects what goes along with every state (GetWholeState), and this
+; script hands the two lists it gets on to the server. Every question to the game and every entry of the request
+; costs a picture of the game, so there are as few of both as possible here. What is only added when the server
+; asked for it (things, inventories, a book ...) is added as BuildState does it.
+; _isQuickStateOk tells whether it worked. If not, nothing was used up that BuildState needs
+int Function BuildQuickState()
+    _isQuickStateOk = false
+    float startTime = Utility.GetCurrentRealTime()
+    Actor player = Game.GetPlayer()
+    Actor companion = GetCompanion()
+    Actor viewer = player
+    If _wantedAround && companion
+        If !companion.Is3DLoaded()
+            ; A companion that is not in the loaded area: BuildState knows what to do then
+            Return 0
+        EndIf
+        viewer = companion
+    EndIf
+    ; The quests that keep the horses. They are looked up once, then this script knows them
+    If !_horseQuest || !_playerHorseQuest || !_horseCallQuest
+        GetHorseAlias(HorseAliasHorse)
+        GetPlayerHorseAlias()
+        GetHorseCallAlias(HorseCallAliasHorse)
+    EndIf
+    int listLimit = _wantedListLimit
+    If listLimit < 1
+        listLimit = DefaultListLimit
+    ElseIf listLimit > HighestListLimit
+        listLimit = HighestListLimit
+    EndIf
+
+    int[] options = new int[32]
+    options[StateOptionProtocol] = ProtocolNumber
+    options[StateOptionListLimit] = listLimit
+    options[StateOptionMute] = ToNumber(_isMuteWanted)
+    options[StateOptionHearing] = ToNumber(_isHearing)
+    ; What nothing in the plugin is known to answer exactly like these functions do, the game is asked here
+    options[StateOptionPlayerHealth] = GetHealthPercent(player)
+    options[StateOptionPlayerSitState] = player.GetSitState()
+    options[StateOptionPlayerSleepState] = player.GetSleepState()
+    Form[] ownForms = new Form[8]
+    If companion
+        options[StateOptionCompanionHealth] = GetHealthPercent(companion)
+        options[StateOptionCompanionSitState] = companion.GetSitState()
+        options[StateOptionCompanionRuns] = ToNumber(companion.IsRunning() || companion.IsSprinting())
+        ; What this script keeps itself, as BuildCompanionValues tells it
+        options[StateOptionRideHold] = ToNumber(_isRideHolding && !_rideTarget)
+        options[StateOptionFleeing] = ToNumber(_fleeingActor == companion)
+        options[StateOptionKeepsWeaponAway] = ToNumber(_keepsWeaponAway)
+        options[StateOptionSneakMode] = _sneakMode
+        If !_isAutoHealOff
+            options[StateOptionAutoHealPercent] = GetAutoHealPercent()
+        EndIf
+        If _isLeading && _isLeadPaused
+            options[StateOptionLeadState] = LeadStateWaiting
+        ElseIf _isLeading
+            options[StateOptionLeadState] = LeadStateWalking
+        EndIf
+        options[StateOptionRideLocked] = ToNumber(_isRideLocked)
+        If _walkShownTarget
+            ownForms[StateFormWalkTarget] = _walkShownTarget
+        ElseIf _walkTarget && !_isRoomWalk
+            ownForms[StateFormWalkTarget] = _walkTarget
+        EndIf
+        If _rideTarget && _rideTarget != _rideMarker
+            ownForms[StateFormRideTarget] = _rideTarget
+        EndIf
+        ownForms[StateFormLookTarget] = _lookTarget
+        If _hasLeader && _leader
+            ownForms[StateFormLeader] = _leader
+        EndIf
+        ownForms[StateFormRideLeader] = _rideLeader
+    EndIf
+    ownForms[StateFormHorseQuest] = _horseQuest
+    ownForms[StateFormPlayerHorseQuest] = _playerHorseQuest
+    ownForms[StateFormHorseCallQuest] = _horseCallQuest
+    options[StateOptionMaxQuests] = MaxQuests
+    options[StateOptionMaxQuestTargets] = MaxQuestTargets
+    options[StateOptionPlaceRadius] = PlaceRadiusMeters
+    options[StateOptionMaxPlaceMarkers] = MaxPlaceMarkers
+    options[StateOptionMaxPlaceDoors] = MaxPlaceDoors
+    options[StateOptionTrapRadius] = TrapRadiusMeters
+    options[StateOptionMaxTraps] = MaxTraps
+    options[StateOptionMaxHeardLines] = MaxHeardLines
+    options[StateOptionMaxEventLines] = MaxEventLines
+    options[StateOptionIndoorRadius] = NearbyRadiusMeters as int
+    options[StateOptionOutdoorRadius] = NearbyOutdoorRadiusMeters as int
+    options[StateOptionAliasRider] = HorseAliasRider
+    options[StateOptionAliasHorse] = HorseAliasHorse
+    options[StateOptionAliasPlayerHorse] = PlayerHorseAliasHorse
+    options[StateOptionAliasCalledHorse] = HorseCallAliasHorse
+
+    int[] stateNumbers = KI_MCP_Gefaehrte_Native.GetWholeState(player, companion, viewer, ownForms, options, _namedHorses, _horseNames)
+    If stateNumbers.Length <= StateHeadCount + StateTimeOffset
+        ; The plugin cannot build this state. It has not touched anything then
+        Return 0
+    EndIf
+    string[] stateTexts = KI_MCP_Gefaehrte_Native.GetWholeStateTexts()
+    int stateHandle = SKSE_HTTP.createDictionary()
+    If !SKSE_HTTP.setStringArray(stateHandle, KEY_QUICK_TEXTS, stateTexts)
+        ; A text that cannot be sent. Until the game is loaded again the states are built the old way. What was
+        ; heard and what happened since the last state is lost with this one try
+        _isQuickStateOff = true
+        Debug.Trace("KI_MCP_Gefaehrte: the state in one go could not be sent, back to the old way")
+        Return 0
+    EndIf
+
+    ; From here on it works out, so what the server asked for is used up
+    _wantedAround = false
+    bool areStatsWanted = _wantedStats
+    _wantedStats = false
+    string findText = _wantedFind
+    _wantedFind = ""
+    _wantedListLimit = 0
+    bool areThingsWanted = _wantedThings
+    _wantedThings = false
+    ; A companion that was sent away while it sat would keep sitting for good
+    If _seat && !companion
+        ReleaseSeat()
+    EndIf
+    If companion && _expressionName != ""
+        SetStringSafely(stateHandle, "companion_expression", _expressionName)
+    EndIf
+
+    ; Only when the server asked for it, as in BuildState: levels and skills, the things close to the viewer,
+    ; what carries a name
+    If areStatsWanted
+        SKSE_HTTP.setIntArray(stateHandle, "stats_player", BuildPlayerStats(player))
+        If companion
+            SKSE_HTTP.setIntArray(stateHandle, "stats_companion", BuildCompanionStats(companion))
+        EndIf
+    EndIf
+    If areThingsWanted
+        string[] thingLines = KI_MCP_Gefaehrte_Native.GetNearbyThings(ThingRadiusMeters, listLimit, viewer)
+        If thingLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "things", thingLines)
+        EndIf
+    EndIf
+    If findText != ""
+        string[] foundLines = KI_MCP_Gefaehrte_Native.FindByName(findText, MaxFound, viewer)
+        SetStringSafely(stateHandle, "found_for", findText)
+        If foundLines.Length > 0
+            SKSE_HTTP.setStringArray(stateHandle, "found", foundLines)
+        EndIf
+    EndIf
+
+    ; A whole inventory costs seconds, so it only goes along when the server asked for it
+    string wantedInventory = _wantedInventory
+    string wantedFilter = _wantedInventoryFilter
+    _wantedInventory = ""
+    _wantedInventoryFilter = ""
+    If wantedInventory == INVENTORY_PLAYER || wantedInventory == INVENTORY_BOTH
+        AddWantedInventory(stateHandle, player, "inventory_player", wantedFilter)
+    EndIf
+    If companion && (wantedInventory == INVENTORY_OWN || wantedInventory == INVENTORY_BOTH)
+        AddWantedInventory(stateHandle, companion, "inventory_own", wantedFilter)
+        If wantedFilter == ""
+            AddSpellsToState(stateHandle, companion)
+        EndIf
+    EndIf
+    ; On what the two sit. The plugin told whether they ride, so someone on foot who does not sit costs no question
+    AddSeatToState(stateHandle, player, "player", options[StateOptionPlayerSitState], RideStateOnFoot + stateNumbers[StateHeadPlayerRides])
+    If companion
+        AddSeatToState(stateHandle, companion, "companion", options[StateOptionCompanionSitState], RideStateOnFoot + stateNumbers[StateHeadCompanionRides])
+    EndIf
+    If wantedInventory == INVENTORY_CORPSE
+        AddCorpseToState(stateHandle, _wantedCorpse)
+    EndIf
+    If wantedInventory == INVENTORY_MERCHANT
+        AddMerchantToState(stateHandle, companion, _wantedCorpse as Actor)
+    EndIf
+    _wantedCorpse = None
+    string wantedBookText = _wantedBookText
+    _wantedBookText = ""
+    If wantedBookText != ""
+        AddBookToState(stateHandle, companion, wantedBookText, GetFormFromHalves(_wantedBookHigh, _wantedBookLow), _wantedBookPage)
+    EndIf
+
+    ; What became of loot, move_to and sit since the last state
+    string report = _report
+    _report = ""
+    If report != ""
+        SetStringSafely(stateHandle, "report", report)
+    EndIf
+
+    ; A horse the game no longer shows under the name this script gave it gets that name back. The state names it
+    ; by that name already
+    If stateNumbers[StateHeadPlayerHorseNameLost] != 0
+        KeepHorseName(GetPlayersHorse())
+    EndIf
+    If stateNumbers[StateHeadOwnHorseNameLost] != 0
+        KeepHorseName(GetOwnHorse())
+    EndIf
+
+    ; How long the state took in all, without the two entries that follow. The plugin has written how long it took itself
+    float endTime = Utility.GetCurrentRealTime()
+    stateNumbers[stateNumbers[StateHeadLength] + StateTimeOffset] = ((endTime - startTime) * 1000.0) as int
+    SKSE_HTTP.setIntArray(stateHandle, KEY_QUICK_NUMBERS, stateNumbers)
+    _isQuickStateOk = true
     Return stateHandle
 EndFunction
 
@@ -2347,6 +2659,52 @@ EndFunction
 
 ; ------------------------------------------------------------------- commands
 
+; report_state from a server that sends what the state should carry as one list of numbers (see
+; KEY_COMMAND_STATE_OPTIONS): reads it with as few questions as possible. Returns false if the list is not there,
+; then RunCommands reads the single entries as before
+bool Function ReadWantedState(int reportHandle)
+    int[] wantedOptions = SKSE_HTTP.getIntArray(reportHandle, KEY_COMMAND_STATE_OPTIONS)
+    If wantedOptions.Length < WantedOptionCount
+        Return false
+    EndIf
+    _wantedListLimit = wantedOptions[WantedOptionListLimit]
+    _wantedThings = wantedOptions[WantedOptionThings] != 0
+    _wantedAround = wantedOptions[WantedOptionAround] != 0
+    _wantedStats = wantedOptions[WantedOptionStats] != 0
+    _wantedVisible = wantedOptions[WantedOptionVisible] != 0
+    _wantedSpace = wantedOptions[WantedOptionSpace] != 0
+    _wantedSpaceMeters = wantedOptions[WantedOptionSpaceMeters]
+    _wantedSpaceDegrees = wantedOptions[WantedOptionSpaceDegrees]
+    _wantedSpaceFromFacing = wantedOptions[WantedOptionSpaceFacing] != 0
+    _wantedSpaceAngle = wantedOptions[WantedOptionSpaceAngle]
+    _wantedBookHigh = wantedOptions[WantedOptionReadHigh]
+    _wantedBookLow = wantedOptions[WantedOptionReadLow]
+    _wantedBookPage = wantedOptions[WantedOptionReadPage]
+    _isMuteWanted = wantedOptions[WantedOptionMute] != 0
+    _isSlowStateWanted = wantedOptions[WantedOptionSlow] != 0
+    ; The texts are only read if there are any
+    _wantedInventory = ""
+    If wantedOptions[WantedOptionHasInventory] != 0
+        _wantedInventory = SKSE_HTTP.getString(reportHandle, KEY_COMMAND_DETAIL, "")
+    EndIf
+    _wantedFind = ""
+    If wantedOptions[WantedOptionHasFind] != 0
+        _wantedFind = SKSE_HTTP.getString(reportHandle, KEY_COMMAND_FIND, "")
+    EndIf
+    _wantedInventoryFilter = ""
+    If wantedOptions[WantedOptionHasFilter] != 0
+        _wantedInventoryFilter = SKSE_HTTP.getString(reportHandle, KEY_COMMAND_INVENTORY_FILTER, "")
+    EndIf
+    _wantedBookText = ""
+    If wantedOptions[WantedOptionHasRead] != 0
+        _wantedBookText = SKSE_HTTP.getString(reportHandle, KEY_COMMAND_READ, "")
+    EndIf
+    If _wantedInventory == INVENTORY_CORPSE || _wantedInventory == INVENTORY_MERCHANT
+        _wantedCorpse = GetFormFromHalves(wantedOptions[WantedOptionTargetHigh], wantedOptions[WantedOptionTargetLow]) as ObjectReference
+    EndIf
+    Return true
+EndFunction
+
 ; Returns the handles of the results that go to the server with the next request
 int[] Function RunCommands(int[] commandHandles)
     int resultCount = 0
@@ -2354,6 +2712,8 @@ int[] Function RunCommands(int[] commandHandles)
     While index < commandHandles.Length
         If SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_ACTION, "") != ACTION_REPORT_STATE
             resultCount += 1
+        ElseIf ReadWantedState(commandHandles[index])
+            ; A newer server sent what the state should carry in one list. It is read
         Else
             _wantedInventory = SKSE_HTTP.getString(commandHandles[index], KEY_COMMAND_DETAIL, "")
             _wantedListLimit = SKSE_HTTP.getInt(commandHandles[index], KEY_COMMAND_COUNT, 0)
