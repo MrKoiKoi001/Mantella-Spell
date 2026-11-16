@@ -315,7 +315,10 @@ int[] Function GetLooseItemNumbers() global native
 ; come from GetWholeStateTexts. The companion server unpacks both (expand_quick_state in game_state.py).
 ; viewer: from whom the lists are seen. ownForms and options: what only the script knows, at the places
 ; StateForm... and StateOption... name. namedHorses and horseNames: the horses the script gave a name, and the names.
-; An empty list means: the plugin cannot build this state, and it has not touched anything
+; An empty list means: the plugin cannot build this state, and it has not touched anything.
+; From interface version 25 on: with 'visible' in the options (the companion as the viewer) the characters are only
+; those the viewer sees, has close by or hears, and a further block tells for each of them which it is (1 = seen,
+; 2 = close by, 3 = heard). The second of the two times is how long the plugin took, in tenths of a millisecond
 int[] Function GetWholeState(Actor player, Actor companion, Actor viewer, Form[] ownForms, int[] options, Form[] namedHorses, string[] horseNames) global native
 
 ; The texts that belong to the numbers GetWholeState returned last: the name of the entry of the state, a tab, the

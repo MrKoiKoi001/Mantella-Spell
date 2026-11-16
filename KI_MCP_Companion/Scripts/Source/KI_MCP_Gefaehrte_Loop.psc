@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 16 AutoReadOnly
+int Property ProtocolNumber = 17 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -567,6 +567,12 @@ string Property KEY_COMMAND_READ_PAGE = "companion_read_page" AutoReadOnly
 ; whatever the player does, with "off" it walks upright whatever the player does, with anything else ("auto") it
 ; goes back to doing as the player does
 string Property ACTION_SNEAK = "sneak" AutoReadOnly
+; passive: with 'on' the companion starts no fight of its own accord (the game calls that unaggressive: its
+; aggression is set to 0), but follows as always. 'off' gives it back the aggression it had. The state tells
+; "companion_passive" while it is on. An attack with a target still starts a fight
+string Property ACTION_PASSIVE = "passive" AutoReadOnly
+string Property PASSIVE_OFF = "off" AutoReadOnly
+string Property AggressionValue = "Aggression" AutoReadOnly
 string Property SNEAK_ON = "on" AutoReadOnly
 string Property SNEAK_OFF = "off" AutoReadOnly
 int Property SneakModeAuto = 0 AutoReadOnly
@@ -664,6 +670,13 @@ int Property StateOptionAliasRider = 28 AutoReadOnly
 int Property StateOptionAliasHorse = 29 AutoReadOnly
 int Property StateOptionAliasPlayerHorse = 30 AutoReadOnly
 int Property StateOptionAliasCalledHorse = 31 AutoReadOnly
+; From this version on the plugin also builds a state with 'visible' in one go, if the companion is the viewer:
+; it lists whom the companion sees within VisibleHalfAngleDegrees to the left and right with nothing solid in
+; between, whom it has close by and whom it hears (see GetSenseOf in plugin.cpp). What the player sees, the game
+; tells by its camera, so that stays with BuildState
+int Property NativeVersionWithSenses = 25 AutoReadOnly
+int Property StateOptionVisible = 32 AutoReadOnly
+int Property StateOptionVisibleHalfAngle = 33 AutoReadOnly
 int Property StateFormWalkTarget = 0 AutoReadOnly
 int Property StateFormRideTarget = 1 AutoReadOnly
 int Property StateFormLookTarget = 2 AutoReadOnly
@@ -1096,6 +1109,10 @@ int _companionRideState = 0
 ; The state in one go (see NativeVersionWithWholeState): whether the last try worked, whether it is switched off
 ; until the game is loaded again because it failed, and whether the server asked for the old way this time
 bool _isQuickStateOk = false
+; passive: whether it is on, for whom, and the aggression that character had before
+bool _isPassive = false
+Actor _passiveActor
+float _aggressionBefore = 0.0
 bool _isQuickStateOff = false
 bool _isSlowStateWanted = false
 ; loot and pick_up: the companion has arrived and is taking the things (kneeling down, taking, getting up).
@@ -1117,6 +1134,7 @@ EndEvent
 ; Called by KI_MCP_Gefaehrte_PlayerAlias. Registrations for mod events do not survive loading a save
 Function OnGameLoaded()
     _isQuickStateOff = false
+    KeepPassive()
     StartLoop()
     KeepHorseNames()
     KeepHorseOwner()
@@ -1555,6 +1573,9 @@ int Function BuildState()
         If _expressionName != ""
             SetStringSafely(stateHandle, "companion_expression", _expressionName)
         EndIf
+        If _isPassive && _passiveActor == companion
+            SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
+        EndIf
         int[] ownValues = BuildCompanionValues(companion, player, companionTarget)
         companionSitState = ownValues[12]
         SKSE_HTTP.setIntArray(stateHandle, "companion", ownValues)
@@ -1662,13 +1683,13 @@ int Function BuildState()
     Return stateHandle
 EndFunction
 
-; Whether the state can be built in one go by the plugin (see BuildQuickState). Rays around the companion and
-; "only what can be seen" are rare and stay with the old way
+; Whether the state can be built in one go by the plugin (see BuildQuickState). Rays around the companion are
+; rare and stay with the old way, and so does "only what can be seen" unless the companion is the viewer
 bool Function CanBuildQuickState()
-    If _nativeVersion < NativeVersionWithWholeState || _isQuickStateOff || _isSlowStateWanted
+    If _nativeVersion < NativeVersionWithWholeState || _isQuickStateOff || _isSlowStateWanted || _wantedSpace
         Return false
     EndIf
-    Return !_wantedSpace && !_wantedVisible
+    Return !_wantedVisible || (_wantedAround && _nativeVersion >= NativeVersionWithSenses)
 EndFunction
 
 ; The state, built in one go: the plugin collects what goes along with every state (GetWholeState), and this
@@ -1689,6 +1710,10 @@ int Function BuildQuickState()
         EndIf
         viewer = companion
     EndIf
+    If _wantedVisible && viewer == player
+        ; What the player sees, the game tells by its camera: BuildState asks it
+        Return 0
+    EndIf
     ; The quests that keep the horses. They are looked up once, then this script knows them
     If !_horseQuest || !_playerHorseQuest || !_horseCallQuest
         GetHorseAlias(HorseAliasHorse)
@@ -1702,8 +1727,10 @@ int Function BuildQuickState()
         listLimit = HighestListLimit
     EndIf
 
-    int[] options = new int[32]
+    int[] options = new int[34]
     options[StateOptionProtocol] = ProtocolNumber
+    options[StateOptionVisible] = ToNumber(_wantedVisible)
+    options[StateOptionVisibleHalfAngle] = VisibleHalfAngleDegrees as int
     options[StateOptionListLimit] = listLimit
     options[StateOptionMute] = ToNumber(_isMuteWanted)
     options[StateOptionHearing] = ToNumber(_isHearing)
@@ -1780,6 +1807,7 @@ int Function BuildQuickState()
 
     ; From here on it works out, so what the server asked for is used up
     _wantedAround = false
+    _wantedVisible = false
     bool areStatsWanted = _wantedStats
     _wantedStats = false
     string findText = _wantedFind
@@ -1793,6 +1821,9 @@ int Function BuildQuickState()
     EndIf
     If companion && _expressionName != ""
         SetStringSafely(stateHandle, "companion_expression", _expressionName)
+    EndIf
+    If companion && _isPassive && _passiveActor == companion
+        SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
     EndIf
 
     ; Only when the server asked for it, as in BuildState: levels and skills, the things close to the viewer,
@@ -1867,7 +1898,11 @@ int Function BuildQuickState()
 
     ; How long the state took in all, without the two entries that follow. The plugin has written how long it took itself
     float endTime = Utility.GetCurrentRealTime()
-    stateNumbers[stateNumbers[StateHeadLength] + StateTimeOffset] = ((endTime - startTime) * 1000.0) as int
+    ; The place and the time are worked out first: written in one line with the list itself in the index, the time
+    ; never arrived (the log showed 0 for every state)
+    int timePlace = stateNumbers[StateHeadLength] + StateTimeOffset
+    int totalMilliseconds = ((endTime - startTime) * 1000.0) as int
+    stateNumbers[timePlace] = totalMilliseconds
     SKSE_HTTP.setIntArray(stateHandle, KEY_QUICK_NUMBERS, stateNumbers)
     _isQuickStateOk = true
     Return stateHandle
@@ -2814,6 +2849,9 @@ int Function RunCommand(int commandHandle, string actionName)
                 resultText = "The game did not take the new name for " + oldHorseName + "."
             EndIf
         EndIf
+    ElseIf actionName == ACTION_PASSIVE
+        isOk = true
+        resultText = SetPassive(companion, SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, ""))
     ElseIf actionName == ACTION_SNEAK
         string sneakDetail = SKSE_HTTP.getString(commandHandle, KEY_COMMAND_DETAIL, "")
         If sneakDetail == SNEAK_ON && (IsRideWanted() || companion.IsOnMount())
@@ -3334,7 +3372,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_CAST_SPELL || actionName == ACTION_CLAIM_HORSE || actionName == ACTION_MOUNT || actionName == ACTION_DISMOUNT || actionName == ACTION_RIDE_LOCK || actionName == ACTION_CALL_HORSE || actionName == ACTION_RENAME_HORSE
         Return true
     EndIf
-    If actionName == ACTION_RELEASE_HORSE || actionName == ACTION_SNEAK
+    If actionName == ACTION_RELEASE_HORSE || actionName == ACTION_SNEAK || actionName == ACTION_PASSIVE
         Return true
     EndIf
     If actionName == ACTION_LEAD || actionName == ACTION_AUTO_HEAL || actionName == ACTION_BUY || actionName == ACTION_SELL
@@ -7123,6 +7161,7 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             UpdateMutedSpeaker(watched)
             CheckCatchUp()
             UpdateSneak(watched)
+            UpdatePassive(watched)
             ; Every question to the game costs the script a picture of the game, and all of this together took about
             ; as long as the second between two rounds. So what can wait a moment longer only runs every other round
             If watchRound % 2 == 0
@@ -7213,6 +7252,53 @@ Event OnControlDown(string control)
         UpdateSneak(GetCompanion())
     EndIf
 EndEvent
+
+; passive: on (anything but PASSIVE_OFF) or off. Returns the text for the AI
+string Function SetPassive(Actor companion, string wanted)
+    If wanted == PASSIVE_OFF
+        If !_isPassive
+            Return "You were not holding back: you attack enemies of your own accord, as always."
+        EndIf
+        ReleasePassive()
+        Return "You attack enemies of your own accord again."
+    EndIf
+    If _isPassive && _passiveActor == companion
+        Return "You are holding back already. That holds until passive with 'off'."
+    EndIf
+    ; Someone else was held back before: that one gets its own way back first
+    ReleasePassive()
+    _aggressionBefore = companion.GetBaseActorValue(AggressionValue)
+    companion.SetActorValue(AggressionValue, 0.0)
+    _passiveActor = companion
+    _isPassive = true
+    Return "You hold back now: you follow as always, but start no fight of your own accord. If you or the player are attacked, you fight back, and 'attack' with a target still works. This holds until passive with 'off'."
+EndFunction
+
+; Gives the character that was held back the aggression it had before
+Function ReleasePassive()
+    Actor heldBack = _passiveActor
+    bool wasPassive = _isPassive
+    _isPassive = false
+    _passiveActor = None
+    If wasPassive && heldBack
+        heldBack.SetActorValue(AggressionValue, _aggressionBefore)
+    EndIf
+EndFunction
+
+; Called once a second by the follow watch: if another character follows the player now (or none), the one that
+; was held back gets its own way back. Costs no question to the game while nothing has changed
+Function UpdatePassive(Actor companion)
+    If _isPassive && _passiveActor != companion
+        ReleasePassive()
+    EndIf
+EndFunction
+
+; Called after a save was loaded: the aggression is set again, in case the game did not keep it
+Function KeepPassive()
+    If _isPassive && _passiveActor
+        _passiveActor.SetActorValue(AggressionValue, 0.0)
+    EndIf
+EndFunction
 
 ; Called after a save was loaded: what was forced is forced again, in case the game did not keep it
 Function KeepSneakMode()
