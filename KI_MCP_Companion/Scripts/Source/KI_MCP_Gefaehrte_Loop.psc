@@ -541,6 +541,9 @@ float Property MountWatchSeconds = 1.0 AutoReadOnly
 float Property MountStuckUnits = 25.0 AutoReadOnly
 float Property MountStuckSeconds = 4.0 AutoReadOnly
 float Property MountLongestSeconds = 40.0 AutoReadOnly
+; A horse in the loaded area is walked to, however far away it stands, so the walk gets a time of its own:
+; MountLongestSeconds only counts while the companion is within HorseSummonUnits of the horse
+float Property MountWalkLongestSeconds = 150.0 AutoReadOnly
 string Property EVENT_MOUNT_HELP = "KI_MCP_Gefaehrte_MountHelp" AutoReadOnly
 ; From interface version 14 on the SKSE plugin tells which horse a character rides (GetMount)
 int Property NativeVersionWithMount = 14 AutoReadOnly
@@ -6406,7 +6409,15 @@ EndFunction
 
 ; Only call this after GetCallProblem said that it can be done. The horse runs to the player and stays there
 string Function CallHorse(Actor horse, Actor destination)
-    ; A call that is still running is over
+    ; A call that is still running is over: the quest of the game mod can only make one horse run at a time
+    string endedCallNote = ""
+    ReferenceAlias runningAlias = GetHorseCallAlias(HorseCallAliasHorse)
+    If runningAlias
+        Actor runningHorse = runningAlias.GetActorReference()
+        If runningHorse && runningHorse != horse
+            endedCallNote = " " + runningHorse.GetDisplayName() + ", which was called before, stops where it is now: only one horse can be called at a time."
+        EndIf
+    EndIf
     EndHorseCall()
     string destinationWords = "you"
     If destination == Game.GetPlayer()
@@ -6417,17 +6428,17 @@ string Function CallHorse(Actor horse, Actor destination)
         float sideAngle = destination.GetAngleZ() + 90.0
         horse.MoveTo(destination, HorseCallBesideUnits * Math.sin(sideAngle), HorseCallBesideUnits * Math.cos(sideAngle), 0.0, true)
         horse.EvaluatePackage()
-        Return horse.GetDisplayName() + " was too far away to run and is brought next to " + destinationWords + ". It stays there."
+        Return horse.GetDisplayName() + " was too far away to run and is brought next to " + destinationWords + ". It stays there." + endedCallNote
     EndIf
     If horse.GetDistance(destination) <= HorseCallDoneUnits
-        Return horse.GetDisplayName() + " is with " + destinationWords + " already."
+        Return horse.GetDisplayName() + " is with " + destinationWords + " already." + endedCallNote
     EndIf
     _horseCallTarget = destination
     GetHorseCallAlias(HorseCallAliasTarget).ForceRefTo(destination)
     GetHorseCallAlias(HorseCallAliasHorse).ForceRefTo(horse)
     horse.EvaluatePackage()
     SendModEvent(EVENT_HORSE_CALL, "", _horseCallNumber as float)
-    Return horse.GetDisplayName() + " runs to " + destinationWords + " and stays there."
+    Return horse.GetDisplayName() + " runs to " + destinationWords + " and stays there." + endedCallNote
 EndFunction
 
 ; Whom the called horse runs to: the companion or the player
@@ -6763,8 +6774,12 @@ string Function StartRiding(Actor companion)
     If calledAlias && calledAlias.GetActorReference() == ownHorse
         EndHorseCall()
     EndIf
-    If !ownHorse.Is3DLoaded() || ownHorse.GetDistance(companion) > HorseSummonUnits
-        ; The horse is put to the right of the companion, facing the same way
+    ; A horse that is in the loaded area is walked to, it does not appear out of nothing: in a test it stood 72 meters
+    ; away and popped up next to the companion. Only a horse the game has not loaded is put to the right of the
+    ; companion, facing the same way. If no way leads to the horse, the watch brings it (see OnMountHelpRequested)
+    bool isHorseBroughtHere = false
+    If !ownHorse.Is3DLoaded()
+        isHorseBroughtHere = true
         float sideAngle = companion.GetAngleZ() + 90.0
         ownHorse.MoveTo(companion, HorseBesideUnits * Math.sin(sideAngle), HorseBesideUnits * Math.cos(sideAngle), 0.0, true)
     EndIf
@@ -6784,7 +6799,10 @@ string Function StartRiding(Actor companion)
     _isMounting = true
     _mountNumber += 1
     SendModEvent(EVENT_MOUNT_HELP, "", _mountNumber as float)
-    Return "You get on " + ownHorse.GetDisplayName() + " and ride after the player. Your next STATE tells you whether you sit on it."
+    If isHorseBroughtHere
+        Return ownHorse.GetDisplayName() + " was too far away to walk to and is brought next to you. You get on and ride after the player. Your next STATE tells you whether you sit on it."
+    EndIf
+    Return "You walk to " + ownHorse.GetDisplayName() + ", get on and ride after the player. Your next STATE tells you whether you sit on it."
 EndFunction
 
 ; Raised by StartRiding. numArg is the number of the mount: getting off or mounting anew ends this watch.
@@ -6797,6 +6815,7 @@ Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form s
     int ownNumber = numArg as int
     float waitedSeconds = 0.0
     float stuckSeconds = 0.0
+    float nearSeconds = 0.0
     bool isToldToUse = false
     bool isHorseBrought = false
     Actor companion = GetCompanion()
@@ -6825,7 +6844,12 @@ Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form s
         Else
             stuckSeconds = 0.0
         EndIf
-        If !isToldToUse && waitedSeconds >= MountHelpSeconds
+        ; Told to use the horse from far away the companion would be in the saddle without having walked there
+        bool isNearHorse = ownHorse.GetDistance(companion) <= HorseSummonUnits
+        If isNearHorse
+            nearSeconds += MountWatchSeconds
+        EndIf
+        If !isToldToUse && isNearHorse && nearSeconds >= MountHelpSeconds
             isToldToUse = true
             ; Getting on takes a moment in which the companion stands still: that is not being stuck yet
             stuckSeconds = 0.0
@@ -6845,7 +6869,7 @@ Event OnMountHelpRequested(string eventName, string strArg, float numArg, Form s
             If !companion.IsOnMount()
                 ownHorse.Activate(companion)
             EndIf
-        ElseIf (stuckSeconds >= MountStuckSeconds && isHorseBrought) || waitedSeconds >= MountLongestSeconds
+        ElseIf (stuckSeconds >= MountStuckSeconds && isHorseBrought) || nearSeconds >= MountLongestSeconds || waitedSeconds >= MountWalkLongestSeconds
             _isMounting = false
             AddFailReport("You did not get on your horse: you stood beside it and the game did not let you up, also after the horse was put right next to you. Try mount again, or somewhere with more room.")
             Return
