@@ -680,6 +680,28 @@ int Property StateOptionAliasCalledHorse = 31 AutoReadOnly
 int Property NativeVersionWithSenses = 25 AutoReadOnly
 int Property StateOptionVisible = 32 AutoReadOnly
 int Property StateOptionVisibleHalfAngle = 33 AutoReadOnly
+; From this version on the plugin also works out what this script used to ask the game for every state: health in
+; percent, sitting and sleeping, running. StateOptionPluginFacts tells it which of them to fill in itself
+; (StateFact...). Nothing here can prove that it tells the same as the game tells a script, so this script checks:
+; in the first state after loading and in every FactsCheckEvery-th one it asks the game as before and compares
+; with what the plugin worked out (it hands that back in the first numbers, StateHeadPlayerHealth and so on).
+; What differs FactsMismatchLimit times in a row is asked for by this script again until the game is loaded anew,
+; and every difference is sent to the server for its log ("plugin_mismatch")
+int Property NativeVersionWithFacts = 26 AutoReadOnly
+int Property StateOptionPluginFacts = 34 AutoReadOnly
+int Property StateFactHealth = 1 AutoReadOnly
+int Property StateFactSitting = 2 AutoReadOnly
+int Property StateFactRunning = 4 AutoReadOnly
+int Property StateHeadPlayerHealth = 5 AutoReadOnly
+int Property StateHeadPlayerSitState = 6 AutoReadOnly
+int Property StateHeadPlayerSleepState = 7 AutoReadOnly
+int Property StateHeadCompanionHealth = 8 AutoReadOnly
+int Property StateHeadCompanionSitState = 9 AutoReadOnly
+int Property StateHeadCompanionRuns = 10 AutoReadOnly
+int Property FactsCheckEvery = 20 AutoReadOnly
+int Property FactsMismatchLimit = 2 AutoReadOnly
+; Health may differ by this many percent: time passes between the question of the plugin and the one of the script
+int Property FactsHealthSlack = 2 AutoReadOnly
 int Property StateFormWalkTarget = 0 AutoReadOnly
 int Property StateFormRideTarget = 1 AutoReadOnly
 int Property StateFormLookTarget = 2 AutoReadOnly
@@ -1112,6 +1134,12 @@ int _companionRideState = 0
 ; The state in one go (see NativeVersionWithWholeState): whether the last try worked, whether it is switched off
 ; until the game is loaded again because it failed, and whether the server asked for the old way this time
 bool _isQuickStateOk = false
+; The check of what the plugin works out itself (see NativeVersionWithFacts): how many states until the next check,
+; and how often in a row each kind of fact has differed
+int _factsCheckCountdown = 0
+int _healthMismatchCount = 0
+int _sittingMismatchCount = 0
+int _runningMismatchCount = 0
 ; passive: whether it is on, for whom, and the aggression that character had before
 bool _isPassive = false
 Actor _passiveActor
@@ -1137,6 +1165,10 @@ EndEvent
 ; Called by KI_MCP_Gefaehrte_PlayerAlias. Registrations for mod events do not survive loading a save
 Function OnGameLoaded()
     _isQuickStateOff = false
+    _factsCheckCountdown = 0
+    _healthMismatchCount = 0
+    _sittingMismatchCount = 0
+    _runningMismatchCount = 0
     KeepPassive()
     StartLoop()
     KeepHorseNames()
@@ -1730,22 +1762,48 @@ int Function BuildQuickState()
         listLimit = HighestListLimit
     EndIf
 
-    int[] options = new int[34]
+    int[] options = new int[35]
+    ; What the plugin works out itself is not asked for here, except in a round that checks it (see NativeVersionWithFacts)
+    bool canUseFacts = _nativeVersion >= NativeVersionWithFacts
+    bool isFactsCheck = canUseFacts && _factsCheckCountdown <= 0
+    bool isHealthAsked = !canUseFacts || isFactsCheck || _healthMismatchCount >= FactsMismatchLimit
+    bool isSittingAsked = !canUseFacts || isFactsCheck || _sittingMismatchCount >= FactsMismatchLimit
+    bool isRunningAsked = !canUseFacts || isFactsCheck || _runningMismatchCount >= FactsMismatchLimit
+    int pluginFacts = 0
+    If !isHealthAsked
+        pluginFacts += StateFactHealth
+    EndIf
+    If !isSittingAsked
+        pluginFacts += StateFactSitting
+    EndIf
+    If !isRunningAsked
+        pluginFacts += StateFactRunning
+    EndIf
+    options[StateOptionPluginFacts] = pluginFacts
     options[StateOptionProtocol] = ProtocolNumber
     options[StateOptionVisible] = ToNumber(_wantedVisible)
     options[StateOptionVisibleHalfAngle] = VisibleHalfAngleDegrees as int
     options[StateOptionListLimit] = listLimit
     options[StateOptionMute] = ToNumber(_isMuteWanted)
     options[StateOptionHearing] = ToNumber(_isHearing)
-    ; What nothing in the plugin is known to answer exactly like these functions do, the game is asked here
-    options[StateOptionPlayerHealth] = GetHealthPercent(player)
-    options[StateOptionPlayerSitState] = player.GetSitState()
-    options[StateOptionPlayerSleepState] = player.GetSleepState()
+    If isHealthAsked
+        options[StateOptionPlayerHealth] = GetHealthPercent(player)
+    EndIf
+    If isSittingAsked
+        options[StateOptionPlayerSitState] = player.GetSitState()
+        options[StateOptionPlayerSleepState] = player.GetSleepState()
+    EndIf
     Form[] ownForms = new Form[8]
     If companion
-        options[StateOptionCompanionHealth] = GetHealthPercent(companion)
-        options[StateOptionCompanionSitState] = companion.GetSitState()
-        options[StateOptionCompanionRuns] = ToNumber(companion.IsRunning() || companion.IsSprinting())
+        If isHealthAsked
+            options[StateOptionCompanionHealth] = GetHealthPercent(companion)
+        EndIf
+        If isSittingAsked
+            options[StateOptionCompanionSitState] = companion.GetSitState()
+        EndIf
+        If isRunningAsked
+            options[StateOptionCompanionRuns] = ToNumber(companion.IsRunning() || companion.IsSprinting())
+        EndIf
         ; What this script keeps itself, as BuildCompanionValues tells it
         options[StateOptionRideHold] = ToNumber(_isRideHolding && !_rideTarget)
         options[StateOptionFleeing] = ToNumber(_fleeingActor == companion)
@@ -1806,6 +1864,25 @@ int Function BuildQuickState()
         _isQuickStateOff = true
         Debug.Trace("KI_MCP_Gefaehrte: the state in one go could not be sent, back to the old way")
         Return 0
+    EndIf
+
+    If canUseFacts && stateNumbers[StateHeadLength] > StateHeadCompanionRuns
+        If isFactsCheck
+            string mismatchText = CheckPluginFacts(stateNumbers, options, companion != None)
+            _factsCheckCountdown = FactsCheckEvery
+            If mismatchText != ""
+                ; Looked at again with the next state: only what differs twice in a row is given up
+                _factsCheckCountdown = 0
+                SetStringSafely(stateHandle, "plugin_mismatch", mismatchText)
+            EndIf
+        Else
+            _factsCheckCountdown -= 1
+        EndIf
+        ; What the plugin filled in itself is what the rest of this function goes by
+        If !isSittingAsked
+            options[StateOptionPlayerSitState] = stateNumbers[StateHeadPlayerSitState]
+            options[StateOptionCompanionSitState] = stateNumbers[StateHeadCompanionSitState]
+        EndIf
     EndIf
 
     ; From here on it works out, so what the server asked for is used up
@@ -1909,6 +1986,40 @@ int Function BuildQuickState()
     SKSE_HTTP.setIntArray(stateHandle, KEY_QUICK_NUMBERS, stateNumbers)
     _isQuickStateOk = true
     Return stateHandle
+EndFunction
+
+; Compares what the plugin worked out for a state (the first numbers of stateNumbers) with what this script asked
+; the game (options), see NativeVersionWithFacts. Returns what differs as a text for the log of the server, or ""
+string Function CheckPluginFacts(int[] stateNumbers, int[] options, bool hasCompanion)
+    string mismatchText = ""
+    int healthGap = stateNumbers[StateHeadPlayerHealth] - options[StateOptionPlayerHealth]
+    int companionGap = 0
+    If hasCompanion
+        companionGap = stateNumbers[StateHeadCompanionHealth] - options[StateOptionCompanionHealth]
+    EndIf
+    If healthGap > FactsHealthSlack || healthGap < -FactsHealthSlack || companionGap > FactsHealthSlack || companionGap < -FactsHealthSlack
+        _healthMismatchCount += 1
+        mismatchText = AddToList(mismatchText, "health in percent: plugin " + stateNumbers[StateHeadPlayerHealth] + " and " + stateNumbers[StateHeadCompanionHealth] + ", script " + options[StateOptionPlayerHealth] + " and " + options[StateOptionCompanionHealth] + " (player and companion)")
+    ElseIf _healthMismatchCount < FactsMismatchLimit
+        _healthMismatchCount = 0
+    EndIf
+    bool isSittingSame = stateNumbers[StateHeadPlayerSitState] == options[StateOptionPlayerSitState] && stateNumbers[StateHeadPlayerSleepState] == options[StateOptionPlayerSleepState]
+    If hasCompanion && stateNumbers[StateHeadCompanionSitState] != options[StateOptionCompanionSitState]
+        isSittingSame = false
+    EndIf
+    If !isSittingSame
+        _sittingMismatchCount += 1
+        mismatchText = AddToList(mismatchText, "sitting, sleeping, companion sitting: plugin " + stateNumbers[StateHeadPlayerSitState] + " " + stateNumbers[StateHeadPlayerSleepState] + " " + stateNumbers[StateHeadCompanionSitState] + ", script " + options[StateOptionPlayerSitState] + " " + options[StateOptionPlayerSleepState] + " " + options[StateOptionCompanionSitState])
+    ElseIf _sittingMismatchCount < FactsMismatchLimit
+        _sittingMismatchCount = 0
+    EndIf
+    If hasCompanion && stateNumbers[StateHeadCompanionRuns] != options[StateOptionCompanionRuns]
+        _runningMismatchCount += 1
+        mismatchText = AddToList(mismatchText, "companion runs: plugin " + stateNumbers[StateHeadCompanionRuns] + ", script " + options[StateOptionCompanionRuns])
+    ElseIf _runningMismatchCount < FactsMismatchLimit
+        _runningMismatchCount = 0
+    EndIf
+    Return mismatchText
 EndFunction
 
 ; Ref ID, health in percent, dead, in combat, waiting, in the loaded area, distance to the player in meters,
