@@ -342,3 +342,16 @@ float[] Function TakeCoverResult() global native
 ; close"), or "" if there is no reason: it lost health since the last call, or an enemy that sees it is closer than
 ; nearMeters. isFirst: the first call for this cover, so there is no health from before to compare with
 string Function GetCoverThreat(Actor companion, int nearMeters, bool isFirst) global native
+
+; The two functions below exist from interface version 28 on
+
+; view: what lies in front of the companion as a grid of cells, columns wide and rows high, over degrees from left to
+; right. One ray per cell tells the ground, wall or ceiling it meets, and the characters and things the plugin knows
+; are put into the cells their outline covers. Returns numbers only: the format, columns, rows, degrees, how many
+; meters the rays reach, how many entries the legend has, how many numbers each entry and each cell has, then the
+; legend and the cells. The companion server makes the lines from them (describe_view in state_text.py).
+; An empty list if the plugin cannot look
+int[] Function GetView(Actor companion, int columns, int rows, int degrees) global native
+
+; The names that belong to the legend GetView returned last, in its order
+string[] Function GetViewNames() global native

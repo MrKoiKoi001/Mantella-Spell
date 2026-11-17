@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 19 AutoReadOnly
+int Property ProtocolNumber = 20 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -792,6 +792,13 @@ int Property WantedOptionHasFind = 18 AutoReadOnly
 int Property WantedOptionHasFilter = 19 AutoReadOnly
 int Property WantedOptionHasRead = 20 AutoReadOnly
 int Property WantedOptionCount = 21 AutoReadOnly
+; view: a newer server adds how many columns and rows the picture in front of the companion is to have (0 = none).
+; The plugin makes it (see GetView in KI_MCP_Gefaehrte_Native.psc), over ViewDegrees from left to right. The state
+; carries its numbers as "view" and the names of its legend as "view_names"
+int Property WantedOptionViewColumns = 21 AutoReadOnly
+int Property WantedOptionViewRows = 22 AutoReadOnly
+int Property NativeVersionWithView = 28 AutoReadOnly
+int Property ViewDegrees = 120 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
 ; At the end it follows the player again
@@ -1103,6 +1110,9 @@ bool _wantedStats = false
 bool _wantedVisible = false
 ; Whether it asked for what the rays find around the companion. Used up by BuildState
 bool _wantedSpace = false
+; view: how many columns and rows the last report_state command asked for (0 = no picture). Used up by AddViewToState
+int _wantedViewColumns = 0
+int _wantedViewRows = 0
 ; How it wants the rays to look (see KEY_COMMAND_SPACE_METERS and the keys after it). They hold as long as _wantedSpace does
 int _wantedSpaceMeters = 0
 int _wantedSpaceDegrees = -1
@@ -1625,6 +1635,7 @@ int Function BuildState()
             EndIf
         EndIf
     EndIf
+    AddViewToState(stateHandle, companion)
 
     ; What the characters around the player said since the last state, one text per line
     ; (see KI_MCP_Gefaehrte_Native.psc). The plugin forgets a line once it has handed it out, the server keeps it for the AI
@@ -1976,6 +1987,7 @@ int Function BuildQuickState()
             SKSE_HTTP.setInt(stateHandle, "companion_covering", 1)
         EndIf
     EndIf
+    AddViewToState(stateHandle, companion)
 
     ; Only when the server asked for it, as in BuildState: levels and skills, the things close to the viewer,
     ; what carries a name
@@ -2897,6 +2909,12 @@ bool Function ReadWantedState(int reportHandle)
     _wantedSpaceDegrees = wantedOptions[WantedOptionSpaceDegrees]
     _wantedSpaceFromFacing = wantedOptions[WantedOptionSpaceFacing] != 0
     _wantedSpaceAngle = wantedOptions[WantedOptionSpaceAngle]
+    _wantedViewColumns = 0
+    _wantedViewRows = 0
+    If wantedOptions.Length > WantedOptionViewRows
+        _wantedViewColumns = wantedOptions[WantedOptionViewColumns]
+        _wantedViewRows = wantedOptions[WantedOptionViewRows]
+    EndIf
     _wantedBookHigh = wantedOptions[WantedOptionReadHigh]
     _wantedBookLow = wantedOptions[WantedOptionReadLow]
     _wantedBookPage = wantedOptions[WantedOptionReadPage]
@@ -7643,6 +7661,27 @@ EndFunction
 Function UpdateHold(Actor companion)
     If _isHolding && _holdActor != companion
         EndHold()
+    EndIf
+EndFunction
+
+; view: adds the picture in front of the companion to a state, if the last report_state asked for one. Costs no
+; question to the game otherwise. Called by both ways of building a state, and uses up what was asked for
+Function AddViewToState(int stateHandle, Actor companion)
+    int viewColumns = _wantedViewColumns
+    int viewRows = _wantedViewRows
+    _wantedViewColumns = 0
+    _wantedViewRows = 0
+    If viewColumns <= 0 || viewRows <= 0 || !companion || _nativeVersion < NativeVersionWithView
+        Return
+    EndIf
+    int[] viewNumbers = KI_MCP_Gefaehrte_Native.GetView(companion, viewColumns, viewRows, ViewDegrees)
+    If viewNumbers.Length == 0
+        Return
+    EndIf
+    SKSE_HTTP.setIntArray(stateHandle, "view", viewNumbers)
+    string[] viewNames = KI_MCP_Gefaehrte_Native.GetViewNames()
+    If viewNames.Length > 0
+        SKSE_HTTP.setStringArray(stateHandle, "view_names", viewNames)
     EndIf
 EndFunction
 
