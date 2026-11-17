@@ -8798,6 +8798,19 @@ string Function GetLocationName(Actor player)
     If currentLocation
         locationName = currentLocation.GetName()
     EndIf
+    ; Indoors the name of the cell comes first, with the location behind it: inside Helgen Keep the location alone
+    ; only said "Helgen". The plugin does the same for the state in one go (GetLocationNameOf)
+    Cell indoorCell = player.GetParentCell()
+    If indoorCell && indoorCell.IsInterior()
+        string roomName = indoorCell.GetName()
+        If roomName != "" && roomName != locationName
+            If locationName == ""
+                locationName = roomName
+            Else
+                locationName = roomName + ", " + locationName
+            EndIf
+        EndIf
+    EndIf
     If locationName == ""
         Cell currentCell = player.GetParentCell()
         If currentCell
