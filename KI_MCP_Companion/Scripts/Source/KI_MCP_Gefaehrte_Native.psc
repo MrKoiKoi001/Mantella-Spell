@@ -366,3 +366,9 @@ string[] Function GetViewNames() global native
 ; known or indoors), the part the time of day leaves in percent, 1 if indoors, the light (0 outdoors, 1 bright,
 ; 2 dim, 3 dark), 1 if a torch keeps the sight from being shorter, the light level, the time of day in minutes
 int[] Function UpdateSight(Actor viewer, int lightLevel) global native
+
+; How much higher or lower than the viewer the characters and things stand that the plugin listed for this viewer
+; since the last call (GetWholeState, GetNearbyValues, GetNearbyThings, GetNearbyTraps, FindByName): two numbers
+; each, the ref ID and the whole meters above the feet of the viewer (negative = below). Only what stands at least
+; 2 meters higher or lower is in the list. The plugin forgets all of them with this call
+int[] Function TakeHeights(Actor viewer) global native

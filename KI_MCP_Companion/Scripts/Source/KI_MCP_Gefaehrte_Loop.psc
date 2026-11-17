@@ -803,6 +803,9 @@ int Property NativeVersionWithView = 28 AutoReadOnly
 ; from the companion, 'space', 'view'), goes to the server as "sight", and the plugin keeps to it by itself
 int Property NativeVersionWithSightRange = 32 AutoReadOnly
 int Property ViewDegrees = 120 AutoReadOnly
+; heights: how much higher or lower than the viewer the characters and things of a state stand (see TakeHeights in
+; KI_MCP_Gefaehrte_Native.psc). Goes to the server as "heights"
+int Property NativeVersionWithHeights = 35 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
 ; At the end it follows the player again
@@ -1654,6 +1657,7 @@ int Function BuildState()
             EndIf
         EndIf
     EndIf
+    AddHeightsToState(stateHandle, viewer)
     AddViewToState(stateHandle, companion)
 
     ; What the characters around the player said since the last state, one text per line
@@ -2038,6 +2042,7 @@ int Function BuildQuickState()
             SKSE_HTTP.setStringArray(stateHandle, "found", foundLines)
         EndIf
     EndIf
+    AddHeightsToState(stateHandle, viewer)
 
     ; A whole inventory costs seconds, so it only goes along when the server asked for it
     string wantedInventory = _wantedInventory
@@ -7705,6 +7710,18 @@ int[] Function ReadSight(Actor viewer)
         _sightMeters = sight[0]
     EndIf
     Return sight
+EndFunction
+
+; heights: adds how much higher or lower than the viewer the characters and things stand that this state lists.
+; Called by both ways of building a state, after the last list that is measured from the viewer. One question to the plugin
+Function AddHeightsToState(int stateHandle, Actor viewer)
+    If !viewer || _nativeVersion < NativeVersionWithHeights
+        Return
+    EndIf
+    int[] heightNumbers = KI_MCP_Gefaehrte_Native.TakeHeights(viewer)
+    If heightNumbers.Length > 0
+        SKSE_HTTP.setIntArray(stateHandle, "heights", heightNumbers)
+    EndIf
 EndFunction
 
 ; view: adds the picture in front of the companion to a state, if the last report_state asked for one. Costs no
