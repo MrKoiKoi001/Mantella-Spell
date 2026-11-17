@@ -801,7 +801,7 @@ int Property NativeVersionWithView = 28 AutoReadOnly
 ; sight: how far the companion sees, by the weather, the time of day and the light (see UpdateSight in
 ; KI_MCP_Gefaehrte_Native.psc). It is asked for with every state that is about what the companion sees ('visible'
 ; from the companion, 'space', 'view'), goes to the server as "sight", and the plugin keeps to it by itself
-int Property NativeVersionWithSight = 32 AutoReadOnly
+int Property NativeVersionWithSightRange = 32 AutoReadOnly
 int Property ViewDegrees = 120 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
@@ -7697,7 +7697,7 @@ EndFunction
 int[] Function ReadSight(Actor viewer)
     int[] nothing
     _sightMeters = 0
-    If !viewer || _nativeVersion < NativeVersionWithSight || !viewer.Is3DLoaded()
+    If !viewer || _nativeVersion < NativeVersionWithSightRange || !viewer.Is3DLoaded()
         Return nothing
     EndIf
     int[] sight = KI_MCP_Gefaehrte_Native.UpdateSight(viewer, viewer.GetLightLevel() as int)
