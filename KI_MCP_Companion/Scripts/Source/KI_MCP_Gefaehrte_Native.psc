@@ -355,3 +355,14 @@ int[] Function GetView(Actor companion, int columns, int rows, int degrees) glob
 
 ; The names that belong to the legend GetView returned last, in its order
 string[] Function GetViewNames() global native
+
+; The function below exists from interface version 32 on
+
+; How far the viewer sees right now: outdoors by the weather and the time of day, indoors by the light where it
+; stands (lightLevel: what GetLightLevel tells for the viewer, below 0 if that is not known), and never less than a
+; few meters if it or the player beside it holds a torch. The plugin keeps the result for a few seconds, and what it
+; is asked next for this viewer (the characters and places it sees, the picture of GetView) goes no further than that.
+; Returns: the meters, the weather (0 clear, 1 cloudy, 2 rain, 3 snow, 4 fog, 5 dense fog, 6 snowstorm, -1 not
+; known or indoors), the part the time of day leaves in percent, 1 if indoors, the light (0 outdoors, 1 bright,
+; 2 dim, 3 dark), 1 if a torch keeps the sight from being shorter, the light level, the time of day in minutes
+int[] Function UpdateSight(Actor viewer, int lightLevel) global native

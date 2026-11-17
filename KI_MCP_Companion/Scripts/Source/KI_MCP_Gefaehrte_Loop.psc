@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 20 AutoReadOnly
+int Property ProtocolNumber = 21 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -798,6 +798,10 @@ int Property WantedOptionCount = 21 AutoReadOnly
 int Property WantedOptionViewColumns = 21 AutoReadOnly
 int Property WantedOptionViewRows = 22 AutoReadOnly
 int Property NativeVersionWithView = 28 AutoReadOnly
+; sight: how far the companion sees, by the weather, the time of day and the light (see UpdateSight in
+; KI_MCP_Gefaehrte_Native.psc). It is asked for with every state that is about what the companion sees ('visible'
+; from the companion, 'space', 'view'), goes to the server as "sight", and the plugin keeps to it by itself
+int Property NativeVersionWithSight = 32 AutoReadOnly
 int Property ViewDegrees = 120 AutoReadOnly
 ; lead: the companion walks ahead to a target like move_to, but stops while the player is further behind than
 ; LeadFarUnits and goes on once the player is within LeadNearUnits. It gives up after LeadGiveUpSeconds of waiting.
@@ -1113,6 +1117,8 @@ bool _wantedSpace = false
 ; view: how many columns and rows the last report_state command asked for (0 = no picture). Used up by AddViewToState
 int _wantedViewColumns = 0
 int _wantedViewRows = 0
+; sight: how many meters the companion sees in the state that is being built (0 = not asked or not known)
+int _sightMeters = 0
 ; How it wants the rays to look (see KEY_COMMAND_SPACE_METERS and the keys after it). They hold as long as _wantedSpace does
 int _wantedSpaceMeters = 0
 int _wantedSpaceDegrees = -1
@@ -1438,6 +1444,15 @@ int Function BuildState()
             isRemoteViewer = true
         EndIf
     EndIf
+    ; How far the companion sees, before anything is collected that it sees. What the player sees, the game tells
+    ; by its camera, so there is no such limit for the player
+    _sightMeters = 0
+    If companion && (isSpaceWanted || _wantedViewColumns > 0 || (isVisibleWanted && viewer == companion && !isRemoteViewer))
+        int[] sightNumbers = ReadSight(companion)
+        If sightNumbers.Length > 0
+            SKSE_HTTP.setIntArray(stateHandle, "sight", sightNumbers)
+        EndIf
+    EndIf
     ; The plugin is told with every state whose own sentences of the game it has to cut off: the companion of the
     ; moment, or nobody. So a new follower is muted in place of the one before, and switching it off counts at once
     UpdateMutedSpeaker(companion)
@@ -1616,6 +1631,10 @@ int Function BuildState()
                 int spaceMeters = _wantedSpaceMeters
                 If spaceMeters <= 0
                     spaceMeters = SurroundingsMeters
+                EndIf
+                ; The rays reach no further than the companion sees
+                If _sightMeters > 0 && spaceMeters > _sightMeters
+                    spaceMeters = _sightMeters
                 EndIf
                 spaceValues = KI_MCP_Gefaehrte_Native.GetSurroundingsToward(companion, spaceMeters, spaceHeading, spaceAngle)
                 ; How the rays looked, so that the server can name the direction of each: the middle of the look as a
@@ -1825,6 +1844,12 @@ int Function BuildQuickState()
         ; What the player sees, the game tells by its camera: BuildState asks it
         Return 0
     EndIf
+    ; How far the companion sees, before the plugin collects what it sees
+    int[] sightNumbers
+    _sightMeters = 0
+    If companion && (_wantedViewColumns > 0 || (_wantedVisible && viewer == companion))
+        sightNumbers = ReadSight(companion)
+    EndIf
     ; The quests that keep the horses. They are looked up once, then this script knows them
     If !_horseQuest || !_playerHorseQuest || !_horseCallQuest
         GetHorseAlias(HorseAliasHorse)
@@ -1986,6 +2011,9 @@ int Function BuildQuickState()
         If _isCovering
             SKSE_HTTP.setInt(stateHandle, "companion_covering", 1)
         EndIf
+    EndIf
+    If sightNumbers.Length > 0
+        SKSE_HTTP.setIntArray(stateHandle, "sight", sightNumbers)
     EndIf
     AddViewToState(stateHandle, companion)
 
@@ -7662,6 +7690,21 @@ Function UpdateHold(Actor companion)
     If _isHolding && _holdActor != companion
         EndHold()
     EndIf
+EndFunction
+
+; sight: asks the plugin how far the viewer sees and returns what it tells (see UpdateSight). An empty list if the
+; plugin is too old or the viewer is not in the loaded area. Sets _sightMeters
+int[] Function ReadSight(Actor viewer)
+    int[] nothing
+    _sightMeters = 0
+    If !viewer || _nativeVersion < NativeVersionWithSight || !viewer.Is3DLoaded()
+        Return nothing
+    EndIf
+    int[] sight = KI_MCP_Gefaehrte_Native.UpdateSight(viewer, viewer.GetLightLevel() as int)
+    If sight.Length > 0
+        _sightMeters = sight[0]
+    EndIf
+    Return sight
 EndFunction
 
 ; view: adds the picture in front of the companion to a state, if the last report_state asked for one. Costs no
