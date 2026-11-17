@@ -532,6 +532,9 @@ string Property HorseKeyword = "ActorTypeHorse" AutoReadOnly
 ; A horse that is further away than this when the companion is to mount is put next to the companion,
 ; HorseBesideUnits to its side. A moment later the companion is told to get on, if it has not done so on its own
 float Property HorseSummonUnits = 512.0 AutoReadOnly
+; A companion that is to ride but is not in the saddle, with its horse further away than this (about 43 meters),
+; is on foot for good: it arrived somewhere without the horse (see EndImpossibleRide)
+float Property RideLostUnits = 3000.0 AutoReadOnly
 float Property HorseBesideUnits = 100.0 AutoReadOnly
 float Property MountHelpSeconds = 2.0 AutoReadOnly
 ; mount: the watch looks every MountWatchSeconds. A companion that is not in the saddle and has moved less than
@@ -3035,6 +3038,8 @@ int Function RunCommand(int commandHandle, string actionName)
     bool isOk = false
     string resultText = ""
     Actor companion = GetCompanion()
+    ; A companion that got somewhere without its horse is on foot, whatever it was told before
+    EndImpossibleRide(companion)
     ; A target the game keeps but does not show is no target (see GetAbsentTargetText)
     string absentText = ""
     If companion && IsKnownAction(actionName)
@@ -7171,6 +7176,31 @@ Function StopRiding(Actor companion)
     companion.EvaluatePackage()
 EndFunction
 
+; Takes back that the companion is to ride when it cannot be riding: it is not in the saddle and is indoors, has no
+; horse any more, or its horse is not in the loaded area or far away. That happens when the companion gets
+; somewhere without its horse (a carriage, a door): the alias that lets it ride stayed filled, and follow, move, wait
+; and sit took it for a rider. While it walks to its horse to get on, only indoors and a lost horse count.
+; Called before every command and by the follow watch
+Function EndImpossibleRide(Actor companion)
+    If !companion || companion.IsDead() || !companion.Is3DLoaded() || !IsRideWanted() || companion.IsOnMount()
+        Return
+    EndIf
+    Cell ownCell = companion.GetParentCell()
+    bool isLost = ownCell && ownCell.IsInterior()
+    If !isLost
+        Actor ownHorse = GetOwnHorse()
+        If !ownHorse
+            isLost = true
+        ElseIf !_isMounting
+            isLost = !ownHorse.Is3DLoaded() || ownHorse.GetDistance(companion) > RideLostUnits
+        EndIf
+    EndIf
+    If isLost
+        StopRiding(companion)
+        AddReport("You are on foot now: your horse is not with you, so you no longer ride.")
+    EndIf
+EndFunction
+
 ; Called by the follow watch every second. When the player has just mounted or dismounted, the companion does the
 ; same, unless it keeps to itself (ride_lock), waits somewhere or has no horse
 Function CheckRideWithPlayer()
@@ -7189,6 +7219,7 @@ Function CheckRideWithPlayer()
             StopRiding(companion)
         EndIf
     EndIf
+    EndImpossibleRide(companion)
     If !hasChanged || _isRideLocked
         Return
     EndIf
