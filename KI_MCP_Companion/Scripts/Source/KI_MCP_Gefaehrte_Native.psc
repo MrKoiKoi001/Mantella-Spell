@@ -375,3 +375,6 @@ int[] Function TakeHeights(Actor viewer) global native
 
 ; Whether this is a piece of furniture a character can lie down and sleep on (a bed, a bed roll)
 bool Function IsBed(ObjectReference thing) global native
+
+; What kind of ammunition an item is: 0 = none, 1 = an arrow, 2 = a bolt for a crossbow
+int Function GetAmmoKind(Form item) global native

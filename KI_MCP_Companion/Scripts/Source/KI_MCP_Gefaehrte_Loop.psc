@@ -101,10 +101,20 @@ string Property KEY_COMMAND_INVENTORY_FILTER = "companion_inventory_filter" Auto
 string Property FILTER_FAVORITES = "favorites" AutoReadOnly
 string Property FILTER_EQUIPPED = "equipped" AutoReadOnly
 int Property EquippedPlaceCount = 11 AutoReadOnly
-; favorite: the companion marks weapons, shields and pieces of armor of its own. The game hands a follower the
-; strongest thing it carries; once a second the script hands it a favorite instead (see CheckFavoriteGear)
+; favorite: the companion marks weapons, shields, pieces of armor and ammunition of its own. The game hands a
+; follower the strongest thing it carries; once a second the script hands it a favorite instead (see CheckFavoriteGear)
 string Property ACTION_FAVORITE = "favorite" AutoReadOnly
 int Property FavoriteItemCount = 20 AutoReadOnly
+; From this interface version on the plugin tells arrows from bolts (see GetAmmoKind in KI_MCP_Gefaehrte_Native.psc)
+int Property NativeVersionWithAmmoKind = 37 AutoReadOnly
+int Property AmmoKindBolt = 2 AutoReadOnly
+; equip on a weapon the companion holds already: it puts the weapon away and takes it in hand anew after this long.
+; That got a companion shooting again that boxed although it held its bow
+float Property RegripSeconds = 0.5 AutoReadOnly
+; What GetEquippedItemType tells for a bow and for a crossbow (not the numbers of GetWeaponType, see WeaponTypeBow)
+int Property EquippedTypeBow = 7 AutoReadOnly
+int Property EquippedTypeCrossbow = 12 AutoReadOnly
+int Property HandValueCount = 5 AutoReadOnly
 ; Weapon.GetWeaponType of SKSE
 int Property WeaponTypeBow = 7 AutoReadOnly
 int Property WeaponTypeStaff = 8 AutoReadOnly
@@ -154,7 +164,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 22 AutoReadOnly
+int Property ProtocolNumber = 25 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -420,6 +430,8 @@ string Property ACTION_EQUIP = "equip" AutoReadOnly
 string Property ACTION_UNEQUIP = "unequip" AutoReadOnly
 string Property ACTION_GIVE = "give" AutoReadOnly
 string Property ACTION_TAKE = "take" AutoReadOnly
+; drop: the companion lets items of its own fall to the ground where it stands, one or several like give
+string Property ACTION_DROP = "drop" AutoReadOnly
 string Property ACTION_LOOT = "loot" AutoReadOnly
 ; Riding. claim_horse: the horse named as the target is the companion's own from now on. mount: the companion gets on
 ; its horse and rides after the player. dismount: it gets off. ride_lock: with "on" in the detail the companion no
@@ -572,6 +584,13 @@ int Property MaxEventLines = 40 AutoReadOnly
 ; With a request to the server, if there are any: the urgent events since the request before (a fight begins,
 ; someone dies), one text per event as the plugin writes them
 string Property KEY_EVENTS = "companion_events" AutoReadOnly
+; The AI can wait for something to happen (the tool WAIT_FOR_EVENT of the server). While it does, every reply of the
+; server carries KEY_WATCH = 1, and every request that carries no state then tells all that happened since the
+; request before: all events under KEY_EVENTS (not only the urgent ones), what the characters around said under
+; KEY_HEARD (built like "heard" of a state) and what became of what the companion started under KEY_REPORT
+string Property KEY_WATCH = "companion_watch" AutoReadOnly
+string Property KEY_HEARD = "companion_heard" AutoReadOnly
+string Property KEY_REPORT = "companion_report" AutoReadOnly
 ; For report_state: the ID of a book to read, as text and cut in two like the target, and the page of it (from 1).
 ; The state then carries that page under "book" and the ID that was asked for under "book_for"
 string Property KEY_COMMAND_READ = "companion_read" AutoReadOnly
@@ -587,6 +606,14 @@ string Property ACTION_SNEAK = "sneak" AutoReadOnly
 ; "companion_passive" while it is on. An attack with a target still starts a fight
 string Property ACTION_PASSIVE = "passive" AutoReadOnly
 string Property PASSIVE_OFF = "off" AutoReadOnly
+; passive with "full": the companion does not fight at all, not even when it is hit. No script can tell a character
+; that. The game does it with packages that take the place of fighting ("combat override"): whoever is in the alias
+; "Calm" of the quest KI_MCP_Gefaehrte_CalmQuest follows whoever is in its alias "Leader" while a fight is on.
+; The state tells "companion_passive" 2 instead of 1 meanwhile. An attack the AI asks for ends it
+string Property PASSIVE_FULL = "full" AutoReadOnly
+int Property CalmQuestFormId = 0x00000820 AutoReadOnly
+int Property CalmAliasCalm = 0 AutoReadOnly
+int Property CalmAliasLeader = 1 AutoReadOnly
 string Property AggressionValue = "Aggression" AutoReadOnly
 ; attack with the detail "hold": the companion stays where it stands and fights from there. The game runs a fight
 ; by itself; the only say a mod has is a package made from the game's template HoldPosition that overrides combat.
@@ -958,6 +985,8 @@ string Property ACTION_CLOSE = "close" AutoReadOnly
 ; Number of the newest request. The server sends it back, so replies to older requests can be told apart
 int _pollId = 0
 bool _isContactShown = false
+; Whether the AI waits for something to happen, as the last reply of the server told (see KEY_WATCH)
+bool _isWatching = false
 ; The follower quest of the game, looked up once
 DialogueFollowerScript _followerQuest
 ; Whom or what the companion is walking to at the moment because of move_to, loot or sit (None = nothing)
@@ -1019,6 +1048,7 @@ Form[] _favoriteItems
 Actor _favoriteOwner
 bool _hasFavoriteWeapon = false
 bool _hasFavoriteArmor = false
+bool _hasFavoriteAmmo = false
 string[] _horseNames
 int _nextNamedHorsePlace = 0
 ; A gesture that is a state (being drunk): the event that ends it, empty if none is on.
@@ -1221,6 +1251,9 @@ int _sittingMismatchCount = 0
 int _runningMismatchCount = 0
 ; passive: whether it is on, for whom, and the aggression that character had before
 bool _isPassive = false
+; Whether the companion that holds back does not fight at all (passive with "full")
+bool _isCalm = false
+Quest _calmQuest
 Actor _passiveActor
 float _aggressionBefore = 0.0
 ; attack with "hold": whether the companion holds a spot, who holds it, and the marker at that spot
@@ -1344,6 +1377,7 @@ Event OnHttpReplyReceived(int typedDictionaryHandle)
         _isContactShown = true
         Debug.Notification("AI companion: server connected")
     EndIf
+    _isWatching = SKSE_HTTP.getInt(typedDictionaryHandle, KEY_WATCH, 0) != 0
 
     int[] resultHandles
     bool isStateWanted = false
@@ -1389,9 +1423,30 @@ Function SendPoll(int[] resultHandles, bool isStateWanted)
     ; What cannot wait until the AI asks for the state: a fight that begins, someone who dies. The server hangs
     ; it onto its next answer to the AI. A state that goes along has taken these already (see BuildState)
     If !isStateWanted && _nativeVersion >= NativeVersionWithEvents
-        string[] urgentLines = KI_MCP_Gefaehrte_Native.TakeUrgentEvents()
+        string[] urgentLines
+        If _isWatching
+            ; The AI waits for something to happen: it gets all of it, the server picks what wakes it
+            urgentLines = KI_MCP_Gefaehrte_Native.TakeEvents(MaxEventLines)
+        Else
+            urgentLines = KI_MCP_Gefaehrte_Native.TakeUrgentEvents()
+        EndIf
         If urgentLines.Length > 0
             SKSE_HTTP.setStringArray(requestHandle, KEY_EVENTS, urgentLines)
+        EndIf
+    EndIf
+    ; While the AI waits, what was said and what became of what the companion started go along as well. Otherwise
+    ; they wait for the next state
+    If !isStateWanted && _isWatching
+        If _isHearing
+            string[] watchedLines = KI_MCP_Gefaehrte_Native.TakeHeardLines(MaxHeardLines)
+            If watchedLines.Length > 0
+                SKSE_HTTP.setStringArray(requestHandle, KEY_HEARD, watchedLines)
+            EndIf
+        EndIf
+        If _report != ""
+            string watchedReport = _report
+            _report = ""
+            SetStringSafely(requestHandle, KEY_REPORT, watchedReport)
         EndIf
     EndIf
     ; Which menus were open in the meantime. The server only writes that into its log, so that a silence can be
@@ -1717,8 +1772,9 @@ int Function BuildState()
         If _expressionName != ""
             SetStringSafely(stateHandle, "companion_expression", _expressionName)
         EndIf
+        AddHandsToState(stateHandle, companion)
         If _isPassive && _passiveActor == companion
-            SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
+            SKSE_HTTP.setInt(stateHandle, "companion_passive", 1 + ToNumber(_isCalm))
         EndIf
         If _isHolding && _holdActor == companion
             SKSE_HTTP.setInt(stateHandle, "companion_holding", 1)
@@ -2023,8 +2079,9 @@ int Function BuildQuickState()
     If companion && _expressionName != ""
         SetStringSafely(stateHandle, "companion_expression", _expressionName)
     EndIf
+    AddHandsToState(stateHandle, companion)
     If companion && _isPassive && _passiveActor == companion
-        SKSE_HTTP.setInt(stateHandle, "companion_passive", 1)
+        SKSE_HTTP.setInt(stateHandle, "companion_passive", 1 + ToNumber(_isCalm))
     EndIf
     If companion && _isHolding && _holdActor == companion
         SKSE_HTTP.setInt(stateHandle, "companion_holding", 1)
@@ -3060,11 +3117,11 @@ int Function RunCommand(int commandHandle, string actionName)
     EndIf
     ; give and take with several items carry them as a list of numbers (see KEY_COMMAND_ITEMS)
     int[] handOverValues
-    If actionName == ACTION_GIVE || actionName == ACTION_TAKE
+    If actionName == ACTION_GIVE || actionName == ACTION_TAKE || actionName == ACTION_DROP
         handOverValues = SKSE_HTTP.getIntArray(commandHandle, KEY_COMMAND_ITEMS)
     EndIf
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, sleep, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, lead, auto_heal, buy, sell, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, sleep, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, lead, auto_heal, buy, sell, equip, unequip, give, take and drop."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -3618,6 +3675,12 @@ int Function RunCommand(int commandHandle, string actionName)
         EndIf
     EndIf
 
+    ; An attack the AI asked for ends not fighting at all (passive with "full"): the switch is off again
+    If isOk && actionName == ACTION_ATTACK && _isCalm
+        ReleasePassive()
+        resultText = resultText + " That ends 'passive full': you fight as always again."
+    EndIf
+
     ; follow while the player rides: the companion rides along, unless it keeps to itself
     If isOk && actionName == ACTION_FOLLOW && !_hasLeader && !_isRideLocked && !IsRideWanted() && Game.GetPlayer().IsOnMount() && GetRideProblem(companion) == ""
         StartRiding(companion)
@@ -3667,7 +3730,7 @@ bool Function IsKnownAction(string actionName)
 EndFunction
 
 bool Function IsItemAction(string actionName)
-    Return actionName == ACTION_EQUIP || actionName == ACTION_UNEQUIP || actionName == ACTION_GIVE || actionName == ACTION_TAKE || actionName == ACTION_FAVORITE
+    Return actionName == ACTION_EQUIP || actionName == ACTION_UNEQUIP || actionName == ACTION_GIVE || actionName == ACTION_TAKE || actionName == ACTION_FAVORITE || actionName == ACTION_DROP
 EndFunction
 
 ; Does what the command says and returns the text for the AI. Only call this after the command was checked
@@ -3970,8 +4033,11 @@ string Function GetItemProblem(Actor companion, Form item, string targetText, st
     If actionName == ACTION_UNEQUIP && !companion.IsEquipped(item)
         Return "You are not wearing or holding " + item.GetName() + "."
     EndIf
-    If actionName == ACTION_FAVORITE && !(item as Weapon) && !(item as Armor)
-        Return "Only weapons, shields and pieces of armor can be favorites, " + item.GetName() + " is none of them."
+    If actionName == ACTION_DROP && companion.IsEquipped(item)
+        Return "You wear or hold " + item.GetName() + ". Put it away first with unequip if you really want to drop it."
+    EndIf
+    If actionName == ACTION_FAVORITE && !(item as Weapon) && !(item as Armor) && !(item as Ammo)
+        Return "Only weapons, shields, pieces of armor, arrows and bolts can be favorites, " + item.GetName() + " is none of them."
     EndIf
     Return ""
 EndFunction
@@ -4004,6 +4070,15 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
             Return "You read " + itemName + " and know the spell " + taughtSpell.GetName() + " now. The tome is used up. Cast the spell with cast_spell."
         EndIf
     EndIf
+    If actionName == ACTION_EQUIP && (item as Weapon) && companion.IsEquipped(item)
+        ; A weapon the companion holds already is put away and taken in hand anew. The game can keep a bow as held
+        ; while the companion moves like someone without a weapon and boxes; this brings the two together again
+        companion.UnequipItem(item, false, true)
+        Utility.Wait(RegripSeconds)
+        companion.EquipItem(item, false, true)
+        CheckFavoriteGear(companion)
+        Return "You take " + itemName + " in hand anew."
+    EndIf
     If actionName == ACTION_EQUIP
         ; The last "true" keeps the game from showing a message. Equipping a potion or food means using it up
         companion.EquipItem(item, false, true)
@@ -4019,6 +4094,21 @@ string Function DoItemCommand(Actor companion, string actionName, Form item, int
     If actionName == ACTION_UNEQUIP
         companion.UnequipItem(item, false, true)
         Return "You put " + itemName + " away."
+    EndIf
+    If actionName == ACTION_DROP
+        int dropCount = companion.GetItemCount(item)
+        If wantedCount > 0 && wantedCount < dropCount
+            dropCount = wantedCount
+        EndIf
+        ; What the script moves itself is no news for the events of the plugin
+        If _nativeVersion >= NativeVersionWithEvents
+            KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
+        EndIf
+        companion.DropObject(item, dropCount)
+        If _nativeVersion >= NativeVersionWithEvents
+            KI_MCP_Gefaehrte_Native.SkipTransferEvents(false)
+        EndIf
+        Return "You drop " + dropCount + " " + itemName + ". It lies on the ground where you stand."
     EndIf
 
     Actor player = Game.GetPlayer()
@@ -4083,7 +4173,11 @@ string Function DoHandOver(Actor companion, string actionName, int[] handOverVal
         giver = player
         receiver = companion
     EndIf
-    PlayHandOverAnimation(companion, actionName, player)
+    ; drop: nobody receives anything, the items fall to the ground where the companion stands
+    bool isDrop = actionName == ACTION_DROP
+    If !isDrop
+        PlayHandOverAnimation(companion, actionName, player)
+    EndIf
     ; What the script moves itself is no news for the events of the plugin
     If _nativeVersion >= NativeVersionWithEvents
         KI_MCP_Gefaehrte_Native.SkipTransferEvents(true)
@@ -4103,12 +4197,18 @@ string Function DoHandOver(Actor companion, string actionName, int[] handOverVal
             int count = giver.GetItemCount(item)
             If count <= 0
                 failedText = AddToList(failedText, item.GetName() + " (none there)")
+            ElseIf isDrop && companion.IsEquipped(item)
+                failedText = AddToList(failedText, item.GetName() + " (you wear or hold it, unequip it first)")
             Else
                 If wantedCount > 0 && wantedCount < count
                     count = wantedCount
                 EndIf
-                ; The "true" keeps the game from showing a message
-                giver.RemoveItem(item, count, true, receiver)
+                If isDrop
+                    companion.DropObject(item, count)
+                Else
+                    ; The "true" keeps the game from showing a message
+                    giver.RemoveItem(item, count, true, receiver)
+                EndIf
                 doneKinds += 1
                 If doneKinds <= HandOverNamedCount
                     doneText = AddToList(doneText, count + " " + item.GetName())
@@ -4125,12 +4225,19 @@ string Function DoHandOver(Actor companion, string actionName, int[] handOverVal
         doneText = doneText + " and " + (doneKinds - HandOverNamedCount) + " more kinds of items"
     EndIf
     string handOverText = "Nothing changed hands."
+    If isDrop
+        handOverText = "Nothing was dropped."
+    EndIf
     If doneKinds > 0 && actionName == ACTION_TAKE
         handOverText = "You take from the player: " + doneText + "."
+    ElseIf doneKinds > 0 && isDrop
+        handOverText = "You drop: " + doneText + ". It lies on the ground where you stand."
     ElseIf doneKinds > 0
         handOverText = "You give the player: " + doneText + "."
     EndIf
-    If failedText != ""
+    If failedText != "" && isDrop
+        handOverText = handOverText + " Not dropped: " + failedText + "."
+    ElseIf failedText != ""
         handOverText = handOverText + " Not handed over: " + failedText + "."
     EndIf
     Return handOverText
@@ -4195,6 +4302,7 @@ EndFunction
 Function UpdateFavoriteKinds()
     _hasFavoriteWeapon = false
     _hasFavoriteArmor = false
+    _hasFavoriteAmmo = false
     int index = 0
     While index < _favoriteItems.Length
         Form favorite = _favoriteItems[index]
@@ -4202,6 +4310,8 @@ Function UpdateFavoriteKinds()
             _hasFavoriteWeapon = true
         ElseIf favorite as Armor
             _hasFavoriteArmor = true
+        ElseIf favorite as Ammo
+            _hasFavoriteAmmo = true
         EndIf
         index += 1
     EndWhile
@@ -4266,19 +4376,23 @@ EndFunction
 ; The game has no switch that keeps a character from using an item (UnequipItem with abPreventEquip does not work
 ; for the weapons of characters), so this looks again and again. Staffs are left alone
 Function CheckFavoriteGear(Actor companion)
-    If !companion || companion != _favoriteOwner || (!_hasFavoriteWeapon && !_hasFavoriteArmor)
+    If !companion || companion != _favoriteOwner || (!_hasFavoriteWeapon && !_hasFavoriteArmor && !_hasFavoriteAmmo)
         Return
     EndIf
     If companion.IsDead() || !companion.Is3DLoaded()
         Return
     EndIf
-    If _hasFavoriteWeapon
+    If _hasFavoriteWeapon || _hasFavoriteAmmo
         Weapon heldWeapon = companion.GetEquippedWeapon()
-        If heldWeapon && heldWeapon.GetWeaponType() != WeaponTypeStaff && !IsFavoriteItem(companion, heldWeapon)
+        If _hasFavoriteWeapon && heldWeapon && heldWeapon.GetWeaponType() != WeaponTypeStaff && !IsFavoriteItem(companion, heldWeapon)
             Weapon wantedWeapon = FindFavoriteWeapon(companion, IsRangedWeapon(heldWeapon))
             If wantedWeapon
                 companion.EquipItem(wantedWeapon, false, true)
+                heldWeapon = wantedWeapon
             EndIf
+        EndIf
+        If _hasFavoriteAmmo && heldWeapon && IsRangedWeapon(heldWeapon)
+            CheckFavoriteAmmo(companion, heldWeapon.GetWeaponType() == WeaponTypeCrossbow)
         EndIf
     EndIf
     If _hasFavoriteArmor
@@ -4290,6 +4404,57 @@ Function CheckFavoriteGear(Actor companion)
         CheckFavoriteArmor(companion, SlotMaskHands)
         CheckFavoriteArmor(companion, SlotMaskFeet)
     EndIf
+EndFunction
+
+; The companion holds a bow or a crossbow: if it carries favorite ammunition for it and has none of that on, it
+; takes the first one. Arrows go with a bow, bolts with a crossbow (only the plugin can tell them apart)
+Function CheckFavoriteAmmo(Actor companion, bool isCrossbow)
+    Form wantedAmmo = None
+    int index = 0
+    While index < _favoriteItems.Length
+        Form candidate = _favoriteItems[index]
+        If (candidate as Ammo) && companion.GetItemCount(candidate) > 0
+            bool isFitting = true
+            If _nativeVersion >= NativeVersionWithAmmoKind
+                isFitting = (KI_MCP_Gefaehrte_Native.GetAmmoKind(candidate) == AmmoKindBolt) == isCrossbow
+            EndIf
+            If isFitting
+                If companion.IsEquipped(candidate)
+                    ; A favorite is on already
+                    Return
+                EndIf
+                If !wantedAmmo
+                    wantedAmmo = candidate
+                EndIf
+            EndIf
+        EndIf
+        index += 1
+    EndWhile
+    If wantedAmmo
+        companion.EquipItem(wantedAmmo, false, true)
+    EndIf
+EndFunction
+
+; A measurement for the companion that boxes although it holds its bow (to be taken out again once the cause is
+; known): while it fights and the game has a bow or a crossbow in its hands, the state tells as "companion_hands"
+; what the game has in the right and in the left hand (GetEquippedItemType), what the animation shows for the right
+; and the left hand (iRightHandType, iLeftHandType), and whether the weapon is drawn
+Function AddHandsToState(int stateHandle, Actor companion)
+    If !companion || !companion.Is3DLoaded() || !companion.IsInCombat()
+        Return
+    EndIf
+    int rightType = companion.GetEquippedItemType(1)
+    int leftType = companion.GetEquippedItemType(0)
+    If rightType != EquippedTypeBow && rightType != EquippedTypeCrossbow && leftType != EquippedTypeBow && leftType != EquippedTypeCrossbow
+        Return
+    EndIf
+    int[] handValues = Utility.CreateIntArray(HandValueCount)
+    handValues[0] = rightType
+    handValues[1] = leftType
+    handValues[2] = companion.GetAnimationVariableInt("iRightHandType")
+    handValues[3] = companion.GetAnimationVariableInt("iLeftHandType")
+    handValues[4] = ToNumber(companion.IsWeaponDrawn())
+    SKSE_HTTP.setIntArray(stateHandle, "companion_hands", handValues)
 EndFunction
 
 Function CheckFavoriteArmor(Actor companion, int slotMask)
@@ -7678,26 +7843,87 @@ string Function SetPassive(Actor companion, string wanted)
         ReleasePassive()
         Return "You attack enemies of your own accord again."
     EndIf
-    If _isPassive && _passiveActor == companion
+    bool isFullWanted = wanted == PASSIVE_FULL
+    If isFullWanted && (!GetCalmAlias(CalmAliasCalm) || !GetCalmAlias(CalmAliasLeader))
+        Return "The game mod is missing its quest for passive with 'full'. The mod has to be built and installed again. passive with 'on' still works."
+    EndIf
+    bool wasPassive = _isPassive && _passiveActor == companion
+    If wasPassive && isFullWanted == _isCalm
+        If _isCalm
+            Return "You do not fight at all already. That holds until passive with 'on' or 'off', or until you are told to attack."
+        EndIf
         Return "You are holding back already. That holds until passive with 'off'."
     EndIf
-    ; Someone else was held back before: that one gets its own way back first
-    ReleasePassive()
-    _aggressionBefore = companion.GetBaseActorValue(AggressionValue)
-    companion.SetActorValue(AggressionValue, 0.0)
-    _passiveActor = companion
-    _isPassive = true
+    If !wasPassive
+        ; Someone else was held back before: that one gets its own way back first
+        ReleasePassive()
+        _aggressionBefore = companion.GetBaseActorValue(AggressionValue)
+        companion.SetActorValue(AggressionValue, 0.0)
+        _passiveActor = companion
+        _isPassive = true
+    EndIf
+    If isFullWanted
+        StartCalm(companion)
+        Return "You do not fight at all now: you start no fight and you do not fight back either, not even when you are hit. In a fight you keep close to the player. This holds until passive with 'on' (you defend yourself again) or 'off', or until you are told to attack."
+    EndIf
+    If _isCalm
+        EndCalm()
+        Return "You defend yourself again: you still start no fight of your own accord, but if you or the player are attacked, you fight back. This holds until passive with 'off'."
+    EndIf
     Return "You hold back now: you follow as always, but start no fight of your own accord. If you or the player are attacked, you fight back, and 'attack' with a target still works. This holds until passive with 'off'."
 EndFunction
 
 ; Gives the character that was held back the aggression it had before
 Function ReleasePassive()
+    EndCalm()
     Actor heldBack = _passiveActor
     bool wasPassive = _isPassive
     _isPassive = false
     _passiveActor = None
     If wasPassive && heldBack
         heldBack.SetActorValue(AggressionValue, _aggressionBefore)
+    EndIf
+EndFunction
+
+; passive with "full": the quest whose package keeps the companion from fighting (see CalmQuestFormId)
+ReferenceAlias Function GetCalmAlias(int aliasId)
+    If !_calmQuest
+        _calmQuest = Game.GetFormFromFile(CalmQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_calmQuest
+        Return None
+    EndIf
+    If !_calmQuest.IsRunning()
+        _calmQuest.Start()
+    EndIf
+    Return _calmQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; Only call this after GetCalmAlias found both aliases. A spot the companion held is given up, a fight is ended
+Function StartCalm(Actor companion)
+    EndHold()
+    GetCalmAlias(CalmAliasLeader).ForceRefTo(Game.GetPlayer())
+    GetCalmAlias(CalmAliasCalm).ForceRefTo(companion)
+    _isCalm = true
+    companion.StopCombat()
+    companion.EvaluatePackage()
+EndFunction
+
+Function EndCalm()
+    If !_isCalm
+        Return
+    EndIf
+    _isCalm = false
+    ReferenceAlias calmAlias = GetCalmAlias(CalmAliasCalm)
+    ReferenceAlias leaderAlias = GetCalmAlias(CalmAliasLeader)
+    If !calmAlias || !leaderAlias
+        Return
+    EndIf
+    Actor calmed = calmAlias.GetActorReference()
+    calmAlias.Clear()
+    leaderAlias.Clear()
+    If calmed
+        calmed.EvaluatePackage()
     EndIf
 EndFunction
 
