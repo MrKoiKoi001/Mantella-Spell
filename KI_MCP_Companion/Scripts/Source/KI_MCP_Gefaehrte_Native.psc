@@ -372,3 +372,6 @@ int[] Function UpdateSight(Actor viewer, int lightLevel) global native
 ; each, the ref ID and the whole meters above the feet of the viewer (negative = below). Only what stands at least
 ; 2 meters higher or lower is in the list. The plugin forgets all of them with this call
 int[] Function TakeHeights(Actor viewer) global native
+
+; Whether this is a piece of furniture a character can lie down and sleep on (a bed, a bed roll)
+bool Function IsBed(ObjectReference thing) global native

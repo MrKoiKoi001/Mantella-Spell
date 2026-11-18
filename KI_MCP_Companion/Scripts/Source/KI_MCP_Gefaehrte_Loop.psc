@@ -154,7 +154,7 @@ int Property OpenStateOpen = 1 AutoReadOnly
 int Property OpenStateOpening = 2 AutoReadOnly
 ; Goes up whenever the lists of numbers in the state change their length or meaning, together with GAME_PROTOCOL
 ; in src/companion/game_state.py of the Mantella fork. So the server can tell a game mod that is older or newer than itself
-int Property ProtocolNumber = 21 AutoReadOnly
+int Property ProtocolNumber = 22 AutoReadOnly
 ; How many characters (and how many things of each kind) one state lists: what holds if the server names no number,
 ; and the most it can ask for. Papyrus only takes a plain number as the length of an array, so the lists
 ; in AddNearbyToState have room for the highest number
@@ -241,6 +241,15 @@ int Property SitAliasSeat = 1 AutoReadOnly
 ; How long the companion gets to walk to a seat and sit down, and how often the script looks whether it sits
 float Property SitTimeoutSeconds = 40.0 AutoReadOnly
 float Property SitCheckSeconds = 1.0 AutoReadOnly
+; sleep: the same for a bed. The package of the sit quest cannot lay a character down, so there is a second quest
+; (KI_MCP_Gefaehrte_SleepQuest) whose alias "Sleeper" carries a package that walks to whatever is in "Bed" and
+; sleeps in it. Lying down takes longer than sitting down. Whether a thing is a bed, only the plugin can tell
+int Property SleepQuestFormId = 0x0000081E AutoReadOnly
+int Property SleepAliasSleeper = 0 AutoReadOnly
+int Property SleepAliasBed = 1 AutoReadOnly
+float Property SleepTimeoutSeconds = 60.0 AutoReadOnly
+int Property SleepStateAsleep = 3 AutoReadOnly
+int Property NativeVersionWithSleep = 36 AutoReadOnly
 ; From this interface version on the SKSE plugin can tell the name of a character's voice
 int Property NativeVersionWithVoice = 6 AutoReadOnly
 ; say: the two lines of this mod the companion can speak (topics in the plugin of this mod). The companion server
@@ -925,6 +934,7 @@ string Property ACTION_CAST_SPELL = "cast_spell" AutoReadOnly
 int Property MaxSpells = 40 AutoReadOnly
 int Property ValuesPerSpell = 2 AutoReadOnly
 string Property ACTION_SIT = "sit" AutoReadOnly
+string Property ACTION_SLEEP = "sleep" AutoReadOnly
 string Property ACTION_LOOK_AT = "look_at" AutoReadOnly
 string Property ACTION_GESTURE = "gesture" AutoReadOnly
 string Property ACTION_SAY = "say" AutoReadOnly
@@ -958,6 +968,9 @@ bool _isSitWalk = false
 ObjectReference _seat
 ; The sit quest of this mod, looked up once
 Quest _sitQuest
+Quest _sleepQuest
+; Whether the seat the companion took (_seat) is a bed it sleeps in (see the command sleep)
+bool _isSeatBed = false
 ; What the companion looks at because of look_at (None = nothing in particular)
 ObjectReference _lookTarget
 ; Whether the companion plays a gesture that may go on until something ends it
@@ -3051,7 +3064,7 @@ int Function RunCommand(int commandHandle, string actionName)
         handOverValues = SKSE_HTTP.getIntArray(commandHandle, KEY_COMMAND_ITEMS)
     EndIf
     If !IsKnownAction(actionName)
-        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, lead, auto_heal, buy, sell, equip, unequip, give and take."
+        resultText = "The game mod cannot do '" + actionName + "' yet. So far it can do follow, wait, attack, stand_down, flee, move_to, move, enter, open, close, make_room, face, loot, pick_up, sit, sleep, look_at, gesture, expression, say, sheathe, draw, cast_spell, claim_horse, mount, dismount, ride_lock, call_horse, rename_horse, sneak, lead, auto_heal, buy, sell, equip, unequip, give and take."
     ElseIf !companion
         resultText = "You have no character in the game yet. The player has to take a follower along first, then that follower is you."
     ElseIf companion.IsDead()
@@ -3502,7 +3515,7 @@ int Function RunCommand(int commandHandle, string actionName)
         bool isLeaderNamed = actionName == ACTION_FOLLOW && targetText != ""
         bool isTrade = actionName == ACTION_BUY || actionName == ACTION_SELL
         Form tradeItem = None
-        If isLeaderNamed || isTrade || actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LEAD || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_ENTER
+        If isLeaderNamed || isTrade || actionName == ACTION_ATTACK || actionName == ACTION_MOVE_TO || actionName == ACTION_LEAD || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_SLEEP || actionName == ACTION_ENTER
             target = GetTargetForm(commandHandle) as ObjectReference
             resultText = GetTargetProblem(companion, target, targetText, actionName == ACTION_ATTACK)
         EndIf
@@ -3519,6 +3532,9 @@ int Function RunCommand(int commandHandle, string actionName)
         EndIf
         If resultText == "" && actionName == ACTION_SIT
             resultText = GetSitProblem(target)
+        EndIf
+        If resultText == "" && actionName == ACTION_SLEEP
+            resultText = GetSleepProblem(target)
         EndIf
         If resultText == "" && actionName == ACTION_LOOT
             int itemHigh = SKSE_HTTP.getInt(commandHandle, KEY_COMMAND_ITEM_HIGH, 0)
@@ -3568,6 +3584,11 @@ int Function RunCommand(int commandHandle, string actionName)
                     SetWaiting(companion, false)
                 EndIf
                 resultText = StartSitting(companion, target)
+            ElseIf actionName == ACTION_SLEEP
+                If followAgain
+                    SetWaiting(companion, false)
+                EndIf
+                resultText = StartSleeping(companion, target)
             ElseIf actionName == ACTION_ENTER
                 resultText = StartEntering(companion, target)
             ElseIf actionName == ACTION_MOVE_TO
@@ -3642,7 +3663,7 @@ bool Function IsKnownAction(string actionName)
     If actionName == ACTION_LEAD || actionName == ACTION_AUTO_HEAL || actionName == ACTION_BUY || actionName == ACTION_SELL
         Return true
     EndIf
-    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT
+    Return IsItemAction(actionName) || actionName == ACTION_FOLLOW || actionName == ACTION_WAIT || actionName == ACTION_ATTACK || actionName == ACTION_STAND_DOWN || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_SLEEP
 EndFunction
 
 bool Function IsItemAction(string actionName)
@@ -6145,6 +6166,7 @@ string Function StartSitting(Actor companion, ObjectReference seat)
     ; Without this the companion only notices its new package when the game next rethinks what it does
     companion.EvaluatePackage()
     _seat = seat
+    _isSeatBed = false
     _isSitWalk = true
     _walkTarget = seat
     SendModEvent(EVENT_SIT, "", _walkNumber as float)
@@ -6162,20 +6184,36 @@ Event OnSitRequested(string eventName, string strArg, float numArg, Form sender)
     EndIf
     float waitedSeconds = 0.0
     bool isSeated = false
-    While !isSeated && waitedSeconds < SitTimeoutSeconds
+    ; In a bed the companion is there once it sleeps (see the command sleep)
+    bool isBed = _isSeatBed
+    float timeoutSeconds = SitTimeoutSeconds
+    If isBed
+        timeoutSeconds = SleepTimeoutSeconds
+    EndIf
+    While !isSeated && waitedSeconds < timeoutSeconds
         Utility.Wait(SitCheckSeconds)
         waitedSeconds += SitCheckSeconds
         If ownWalkNumber != _walkNumber
             ; A newer command has taken over in the meantime
             Return
         EndIf
-        isSeated = companion.GetSitState() == SitStateSeated
+        If isBed
+            isSeated = companion.GetSleepState() == SleepStateAsleep
+        Else
+            isSeated = companion.GetSitState() == SitStateSeated
+        EndIf
     EndWhile
     _walkTarget = None
     _isSitWalk = false
     If !isSeated
         ReleaseSeat()
-        AddFailReport("You could not sit down on " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it.")
+        If isBed
+            AddFailReport("You could not lie down in " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it (a bed that belongs to someone else can be the reason).")
+        Else
+            AddFailReport("You could not sit down on " + seat.GetDisplayName() + ": you did not get there in time, or the game would not let you use it.")
+        EndIf
+    ElseIf isBed
+        AddReport("You lie in " + seat.GetDisplayName() + " and sleep. 'follow' gets you up again.")
     EndIf
 EndEvent
 
@@ -6186,9 +6224,69 @@ Function StandUp()
     EndIf
 EndFunction
 
-; Empties the aliases of the sit quest. Whoever was the sitter loses the package and gets up
+; sleep: the quest whose package lays the companion down (see SleepQuestFormId)
+ReferenceAlias Function GetSleepAlias(int aliasId)
+    If !_sleepQuest
+        _sleepQuest = Game.GetFormFromFile(SleepQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_sleepQuest
+        Return None
+    EndIf
+    If !_sleepQuest.IsRunning()
+        _sleepQuest.Start()
+    EndIf
+    Return _sleepQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; Returns why the companion cannot sleep in the target, or "" if it can
+string Function GetSleepProblem(ObjectReference bed)
+    If _nativeVersion < NativeVersionWithSleep
+        Return "Sleeping needs a newer plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version " + NativeVersionWithSleep + ") than the one that is installed."
+    EndIf
+    Form baseForm = bed.GetBaseObject()
+    If !baseForm || baseForm.GetType() != FormTypeFurniture || !KI_MCP_Gefaehrte_Native.IsBed(bed)
+        Return bed.GetDisplayName() + " is no bed. Take the ref_id of a bed from 'Things' in STATE (argument 'things')."
+    EndIf
+    If bed.IsFurnitureInUse()
+        Return bed.GetDisplayName() + " is taken."
+    EndIf
+    If !GetSleepAlias(SleepAliasSleeper) || !GetSleepAlias(SleepAliasBed)
+        Return "The game mod is missing its sleep quest, so you cannot lie down. The mod has to be built and installed again."
+    EndIf
+    Return ""
+EndFunction
+
+; Sends the companion to the bed. Only call this after the command was checked. Works like StartSitting, with the
+; quest for sleeping: the bed counts as the seat the companion took, so whatever gets it up from a seat gets it out of bed
+string Function StartSleeping(Actor companion, ObjectReference bed)
+    GetSleepAlias(SleepAliasBed).ForceRefTo(bed)
+    GetSleepAlias(SleepAliasSleeper).ForceRefTo(companion)
+    companion.EvaluatePackage()
+    _seat = bed
+    _isSeatBed = true
+    _isSitWalk = true
+    _walkTarget = bed
+    SendModEvent(EVENT_SIT, "", _walkNumber as float)
+    Return "You walk to " + bed.GetDisplayName() + " and lie down to sleep. You are told once you sleep, or if you could not lie down. 'follow' gets you up and makes you come along again."
+EndFunction
+
+; Empties the aliases of the sit quest and of the sleep quest. Whoever was the sitter or the sleeper loses the
+; package and gets up
 Function ReleaseSeat()
     _seat = None
+    If _isSeatBed
+        _isSeatBed = false
+        ReferenceAlias sleeperAlias = GetSleepAlias(SleepAliasSleeper)
+        ReferenceAlias bedAlias = GetSleepAlias(SleepAliasBed)
+        If sleeperAlias && bedAlias
+            Actor sleeper = sleeperAlias.GetActorReference()
+            sleeperAlias.Clear()
+            bedAlias.Clear()
+            If sleeper
+                sleeper.EvaluatePackage()
+            EndIf
+        EndIf
+    EndIf
     ReferenceAlias sitterAlias = GetSitAlias(SitAliasSitter)
     ReferenceAlias seatAlias = GetSitAlias(SitAliasSeat)
     If !sitterAlias || !seatAlias
@@ -6244,7 +6342,7 @@ EndFunction
 
 ; Whether this command is something the companion can only do on foot
 bool Function IsOnFootAction(string actionName, int commandHandle)
-    If actionName == ACTION_ENTER || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_PICK_UP
+    If actionName == ACTION_ENTER || actionName == ACTION_LOOT || actionName == ACTION_SIT || actionName == ACTION_SLEEP || actionName == ACTION_PICK_UP
         Return true
     EndIf
     If actionName == ACTION_LEAD || actionName == ACTION_BUY || actionName == ACTION_SELL
@@ -7696,7 +7794,7 @@ bool Function IsHoldEndingAction(string actionName)
     If actionName == ACTION_FOLLOW || actionName == ACTION_ATTACK || actionName == ACTION_FLEE || actionName == ACTION_MOVE_TO || actionName == ACTION_MOVE || actionName == ACTION_ENTER || actionName == ACTION_LEAD
         Return true
     EndIf
-    If actionName == ACTION_LOOT || actionName == ACTION_PICK_UP || actionName == ACTION_SIT || actionName == ACTION_MAKE_ROOM || actionName == ACTION_MOUNT
+    If actionName == ACTION_LOOT || actionName == ACTION_PICK_UP || actionName == ACTION_SIT || actionName == ACTION_SLEEP || actionName == ACTION_MAKE_ROOM || actionName == ACTION_MOUNT
         Return true
     EndIf
     Return actionName == ACTION_BUY || actionName == ACTION_SELL
