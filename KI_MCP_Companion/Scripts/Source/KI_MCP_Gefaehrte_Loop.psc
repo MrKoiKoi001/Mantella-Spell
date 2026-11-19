@@ -1777,7 +1777,7 @@ int Function BuildState()
         If _expressionName != ""
             SetStringSafely(stateHandle, "companion_expression", _expressionName)
         EndIf
-        AddHandsToState(stateHandle, companion)
+        AddHandTypesToState(stateHandle, companion)
         If _isPassive && _passiveActor == companion
             SKSE_HTTP.setInt(stateHandle, "companion_passive", 1 + ToNumber(_isCalm))
         EndIf
@@ -2084,7 +2084,7 @@ int Function BuildQuickState()
     If companion && _expressionName != ""
         SetStringSafely(stateHandle, "companion_expression", _expressionName)
     EndIf
-    AddHandsToState(stateHandle, companion)
+    AddHandTypesToState(stateHandle, companion)
     If companion && _isPassive && _passiveActor == companion
         SKSE_HTTP.setInt(stateHandle, "companion_passive", 1 + ToNumber(_isCalm))
     EndIf
@@ -4444,7 +4444,7 @@ EndFunction
 ; known): while it fights and the game has a bow or a crossbow in its hands, the state tells as "companion_hands"
 ; what the game has in the right and in the left hand (GetEquippedItemType), what the animation shows for the right
 ; and the left hand (iRightHandType, iLeftHandType), and whether the weapon is drawn
-Function AddHandsToState(int stateHandle, Actor companion)
+Function AddHandTypesToState(int stateHandle, Actor companion)
     If !companion || !companion.Is3DLoaded() || !companion.IsInCombat()
         Return
     EndIf
