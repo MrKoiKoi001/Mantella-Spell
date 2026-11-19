@@ -174,6 +174,16 @@ int Function GetLootCount(ObjectReference holder) global native
 ; fighting) and ends what is counted together
 Function TickEvents(Actor companion) global native
 
+; From interface version 38 on, instead of TickEvents: the same, and isFollowing tells whether the companion is to
+; follow the player right now (not sent somewhere, not seated, not holding a spot). With it the plugin tells when the
+; companion falls behind the player. It also tells when the companion is stuck, low on arrows or potions, and when
+; the player gets a bounty or a level
+Function TickWatch(Actor companion, bool isFollowing) global native
+
+; Which horse is the companion's and which is the player's (None = none): a hit on one of them and its death become
+; events wherever the horse stands
+Function SetWatchedHorses(Actor ownHorse, Actor playersHorse) global native
+
 ; What happened since the last call, oldest first, at most maxLines (then the newest ones). One text per event, its
 ; parts separated by tabs: how many seconds ago, the time of day in the game in minutes since midnight,
 ; urgent (1 or 0), what happened. The plugin forgets an event once it has handed it out

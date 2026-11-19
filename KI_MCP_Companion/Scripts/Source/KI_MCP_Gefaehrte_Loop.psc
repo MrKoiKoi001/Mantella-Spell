@@ -579,6 +579,11 @@ int Property NativeVersionWithLoot = 16 AutoReadOnly
 ; From interface version 17 on the SKSE plugin keeps what happens in the game with the time it happened (TickEvents,
 ; TakeEvents, TakeUrgentEvents) and hands out the text of a book page by page (GetBookText)
 int Property NativeVersionWithEvents = 17 AutoReadOnly
+; From interface version 38 on the plugin is told with every look of the follow watch whether the companion is to
+; follow the player (TickWatch instead of TickEvents), and every HorseWatchRounds looks which horses to watch over
+; (SetWatchedHorses). See KI_MCP_Gefaehrte_Native.psc
+int Property NativeVersionWithWatch = 38 AutoReadOnly
+int Property HorseWatchRounds = 20 AutoReadOnly
 ; At most this many events go to the server with one state
 int Property MaxEventLines = 40 AutoReadOnly
 ; With a request to the server, if there are any: the urgent events since the request before (a fight begins,
@@ -7753,12 +7758,26 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
                 UpdateAutoHeal(watched)
             EndIf
             ; The plugin learns who the companion is, and keeps what has no event of the game (see TickEvents)
-            If _nativeVersion >= NativeVersionWithEvents
+            If _nativeVersion >= NativeVersionWithWatch
+                KI_MCP_Gefaehrte_Native.TickWatch(watched, IsFollowingPlayer(watched))
+                If watchRound % HorseWatchRounds == 0
+                    KI_MCP_Gefaehrte_Native.SetWatchedHorses(GetOwnHorse(), GetPlayersHorse())
+                EndIf
+            ElseIf _nativeVersion >= NativeVersionWithEvents
                 KI_MCP_Gefaehrte_Native.TickEvents(watched)
             EndIf
         EndIf
     EndWhile
 EndEvent
+
+; Whether the companion is to follow the player right now: nothing it was told keeps it somewhere else. Asks the
+; game nothing. Whether it waits, fights or rides, the plugin sees itself (see TickWatch)
+bool Function IsFollowingPlayer(Actor companion)
+    If !companion || _hasLeader || _walkTarget || _seat || _isHolding || _isLeading || _isLooting || _isMounting
+        Return false
+    EndIf
+    Return _fleeingActor != companion && !_rideTarget && !_isRideHolding && !_rideLeader
+EndFunction
 
 ; ---------------------------------------------------------------------- sneak
 ; The game makes a follower sneak exactly when the player sneaks: that comes with being the player's "teammate"
