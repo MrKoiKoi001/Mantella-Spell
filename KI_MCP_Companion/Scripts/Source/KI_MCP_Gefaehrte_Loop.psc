@@ -686,6 +686,9 @@ int Property NativeVersionWithActions = 18 AutoReadOnly
 ; holds (StartAttack, EndAttack), tell what the game said to that (GetAttackActionResult), and tell how far a
 ; character is with an attack (GetAttackState)
 int Property NativeVersionWithAttack = 41 AutoReadOnly
+; From interface version 42 on the SKSE plugin can send the arrows of a character to a target (SetArrowTarget,
+; GetAimedArrowCount). Without a target an arrow flies straight ahead: in a test it hit the player in front
+int Property NativeVersionWithArrowAim = 42 AutoReadOnly
 ; From interface version 19 on the SKSE plugin can say whom a character looks at while it speaks (SetTalkTarget).
 ; The game puts the player there for every line spoken with Actor.Say, and that comes before what Actor.SetLookAt sets
 int Property NativeVersionWithTalkTarget = 19 AutoReadOnly
@@ -4088,6 +4091,8 @@ EndFunction
 ; In the first test in the game the companion did not draw its bow that way, neither in the saddle nor on foot, and
 ; put the bow away at once. Why is not known. So a shot is tried in two ways now, and each try writes down what the
 ; game does meanwhile (see TryShot): the notes go out with the report and are read in the log of the server.
+; In the next test the game let the companion draw and shoot from the saddle once 'sheathe' was off, but the arrow
+; flew straight ahead and hit the player. So the plugin turns the arrow to the target (SetArrowTarget).
 ; The companion looks at its target; nothing else tells the game whom the arrow is for
 
 ; Returns why the companion cannot shoot now, or "" if it can
@@ -4100,6 +4105,9 @@ string Function GetShootProblem(Actor companion)
     EndIf
     If _isCasting
         Return "You are casting. Wait until that is over."
+    EndIf
+    If _keepsWeaponAway
+        Return "Your weapon is kept away (sheathe): the game would put your bow away again at once. Give 'draw' first, then shoot."
     EndIf
     If !companion.Is3DLoaded()
         Return "You are not where the player is."
@@ -4172,6 +4180,11 @@ Function ShootArrow(Actor companion, Actor shootTarget)
         Return
     EndIf
     Utility.Wait(ShootReadySeconds)
+    ; The plugin turns the arrow to the target once it has left the bow (else it flies straight ahead)
+    bool canAim = _nativeVersion >= NativeVersionWithArrowAim
+    If canAim
+        KI_MCP_Gefaehrte_Native.SetArrowTarget(companion, shootTarget)
+    EndIf
     ; The first way: what the attack button does for the player. With a bow in the hands that draws it
     string shotNotes = "by action: " + TryShot(companion, true)
     If !_isShotDrawn
@@ -4185,6 +4198,12 @@ Function ShootArrow(Actor companion, Actor shootTarget)
     EndIf
     bool isDrawn = _isShotDrawn
     bool isReleased = _isShotReleased
+    If canAim
+        shotNotes = shotNotes + " | aimed " + KI_MCP_Gefaehrte_Native.GetAimedArrowCount()
+        KI_MCP_Gefaehrte_Native.SetArrowTarget(companion, None)
+    Else
+        shotNotes = shotNotes + " | not aimed, plugin older than " + NativeVersionWithArrowAim
+    EndIf
     RestoreLook(companion)
     If !wasDrawn && !companion.IsInCombat()
         companion.SheatheWeapon()

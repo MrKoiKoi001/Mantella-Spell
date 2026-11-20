@@ -244,6 +244,14 @@ int Function GetAttackActionResult() global native
 ; shot. -1 = cannot tell
 int Function GetAttackState(Actor attacker) global native
 
+; Sends the arrows of the shooter to the target (its chest) while it is set: when the animation tells that an arrow
+; was let go, the plugin turns that arrow to where the target will be, with the fall of the arrow made up for.
+; None = the arrows fly as the game shoots them again. Returns whether it could be handed to the game
+bool Function SetArrowTarget(Actor shooter, ObjectReference target) global native
+
+; How many arrows were sent to the target since SetArrowTarget set it
+int Function GetAimedArrowCount() global native
+
 ; An inventory in one go. filter: 0 = everything, 1 = only the favorites, 2 = only what is worn and held. The
 ; favorites of the player are what the game has among its favorites; for everybody else they are the items in
 ; "marked". The first text is how many kinds of items passed the filter, then one text per item, at most maxItems,
