@@ -1655,7 +1655,7 @@ int Function BuildState()
     ; and whether the list of characters only holds those the viewer can see (1). Inside a building the game has not
     ; loaded nobody can see anything, so there the list is never filtered
     bool isVisibleOnly = isVisibleWanted && !isRemoteViewer
-    int[] worldValues = new int[7]
+    int[] worldValues = new int[8]
     worldValues[0] = -1
     Weather currentWeather = Weather.GetCurrentWeather()
     If currentWeather
@@ -1669,6 +1669,8 @@ int Function BuildState()
     worldValues[4] = ProtocolNumber
     worldValues[5] = ToNumber(viewer != player)
     worldValues[6] = ToNumber(isVisibleOnly)
+    ; How many days have passed in the game, for the memory of the companion on the server (see memory.py there)
+    worldValues[7] = gameDays as int
     SKSE_HTTP.setIntArray(stateHandle, "world", worldValues)
 
     ; The open quests of the journal with the texts of their objectives, one text per quest
