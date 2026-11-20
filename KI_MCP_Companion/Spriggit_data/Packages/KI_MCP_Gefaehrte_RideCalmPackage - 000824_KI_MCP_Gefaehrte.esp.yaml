@@ -1,0 +1,68 @@
+FormKey: 000824:KI_MCP_Gefaehrte.esp
+EditorID: KI_MCP_Gefaehrte_RideCalmPackage
+Flags:
+- 0x2000
+- AllowSwimming
+- IgnoreCombat
+Type: Package
+PreferredSpeed: Run
+InterruptFlags:
+- HellosToPlayer
+- RandomConversations
+- ObserveCombatBehavior
+- GreetCorpseBehavior
+- ReactionToPlayerActions
+- FriendlyFireComments
+- AggroRadiusBehavior
+- AllowIdleChatter
+- WorldInteractions
+- 0x400
+- 0x800
+- 0x1000
+- 0x2000
+- 0x4000
+- 0x8000
+ScheduleMonth: -1
+ScheduleDayOfWeek: Any
+ScheduleHour: -1
+ScheduleMinute: -1
+Unknown3: 0x000000
+OwnerQuest: 000823:KI_MCP_Gefaehrte.esp
+PackageTemplate: 019B2C:Skyrim.esm
+DataInputVersion: 4
+Data:
+- Key: 0
+  Value:
+    MutagenObjectType: PackageDataTarget
+    Type: SingleRef
+    Target:
+      MutagenObjectType: PackageTargetAlias
+      Alias: 1
+- Key: 1
+  Value:
+    MutagenObjectType: PackageDataFloat
+    Data: 380
+- Key: 2
+  Value:
+    MutagenObjectType: PackageDataFloat
+    Data: 760
+- Key: 4
+  Value:
+    MutagenObjectType: PackageDataBool
+- Key: 6
+  Value:
+    MutagenObjectType: PackageDataBool
+    Data: True
+- Key: 8
+  Value:
+    MutagenObjectType: PackageDataBool
+XnamMarker: 0x09
+OnBegin:
+  Topics:
+  - MutagenObjectType: TopicReference
+OnEnd:
+  Topics:
+  - MutagenObjectType: TopicReference
+OnChange:
+  Topics:
+  - MutagenObjectType: TopicReference

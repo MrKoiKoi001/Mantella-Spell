@@ -461,6 +461,13 @@ string Property CALL_TO_COMPANION = "you" AutoReadOnly
 int Property RideWalkQuestFormId = 0x00000813 AutoReadOnly
 int Property RideWalkAliasRider = 0 AutoReadOnly
 int Property RideWalkAliasLeader = 1 AutoReadOnly
+; passive with "full" in the saddle (a test): a character gets off its horse when a fight begins. To see whether a
+; package that ignores fights keeps it seated, a third quest has the riding package once more, with the flag
+; "Ignore Combat" and with the highest priority of the riding quests. The companion is in its alias "CalmRider"
+; while it does not fight at all and rides after the player (see UpdateRideCalm)
+int Property RideCalmQuestFormId = 0x00000823 AutoReadOnly
+int Property RideCalmAliasRider = 0 AutoReadOnly
+int Property RideCalmAliasLeader = 1 AutoReadOnly
 ; A rider counts as arrived once it is this close to where it rides to (the riding package stops a bit before that)
 float Property RideArrivedUnits = 900.0 AutoReadOnly
 ; Riding to a thing or a spot: the follow package of the horse quest only follows characters, so a travel package
@@ -675,6 +682,10 @@ float Property SneakCheckSeconds = 0.6 AutoReadOnly
 ; cast the spell in its right hand the way the game does (StartHandCast, EndHandCast, GetHandCastState), and list
 ; an inventory in one go (GetInventoryLines)
 int Property NativeVersionWithActions = 18 AutoReadOnly
+; From interface version 41 on the SKSE plugin can make a character press and let go of the attack button whatever it
+; holds (StartAttack, EndAttack), tell what the game said to that (GetAttackActionResult), and tell how far a
+; character is with an attack (GetAttackState)
+int Property NativeVersionWithAttack = 41 AutoReadOnly
 ; From interface version 19 on the SKSE plugin can say whom a character looks at while it speaks (SetTalkTarget).
 ; The game puts the player there for every line spoken with Actor.Say, and that comes before what Actor.SetLookAt sets
 int Property NativeVersionWithTalkTarget = 19 AutoReadOnly
@@ -931,6 +942,14 @@ float Property ShootReleaseSeconds = 1.2 AutoReadOnly
 float Property ShootCheckSeconds = 0.2 AutoReadOnly
 ; What the animation of a character tells while its bow is drawn
 string Property BowDrawnVariable = "bBowDrawn" AutoReadOnly
+; The events of the animation that begin drawing a bow and let go of it, and how the game numbers how far a
+; character is with its bow (see GetAttackState of the plugin): the bow is drawn, and from letting go to the end
+; of the shot
+string Property BowStartEvent = "bowAttackStart" AutoReadOnly
+string Property BowReleaseEvent = "attackRelease" AutoReadOnly
+int Property AttackStateBowDrawn = 10 AutoReadOnly
+int Property AttackStateBowReleasing = 11 AutoReadOnly
+int Property AttackStateBowFollowThrough = 14 AutoReadOnly
 ; What GetInventoryLines of the plugin lists: everything, the favorites, or what is worn and held
 int Property InventoryFilterAll = 0 AutoReadOnly
 int Property InventoryFilterFavorites = 1 AutoReadOnly
@@ -1041,6 +1060,9 @@ ObjectReference _stopMarker
 ObjectReference _turnMarker
 bool _isTurning = false
 Quest _rideTravelQuest
+; passive with "full" in the saddle: the quest for it, and whether the companion is in its alias (see UpdateRideCalm)
+Quest _rideCalmQuest
+bool _isRideCalm = false
 ObjectReference _rideHoldMarker
 int _rideWatchNumber = 0
 Faction _horseFaction
@@ -1226,6 +1248,9 @@ bool _isCastOk = false
 bool _isShooting = false
 int _shootNumber = 0
 Actor _shootTarget
+; shoot: whether the try that just ran got the bow drawn, and whether the game showed it letting go (see TryShot)
+bool _isShotDrawn = false
+bool _isShotReleased = false
 ; give and take with several items: whether anything changed hands
 bool _isHandOverOk = false
 ; lead: the companion is leading the player to _leadTarget (also while it waits for the player to catch up)
@@ -4058,15 +4083,17 @@ EndFunction
 ; What the game brings for this, looked up in its files: the movements of a rider with a bow lie with those of all
 ; people (animations\horse_rider\patch\mc_bow_...), the rider's behavior knows drawing and letting go, and the
 ; action "right hand: attack" has a branch for whoever rides and holds a bow (MountedCombatRight in Update.esm),
-; with no condition that keeps it to the player. The plugin triggers that action the way it does for a spell cast
-; by hand (StartHandCast is "press the attack button", EndHandCast is "let go of it").
-; Not known before a test in the game: whether the game lets a rider that is not the player do it, and where the
-; arrow flies. The companion looks at its target; nothing else tells the game whom the arrow is for
+; with no condition that keeps it to the player. The plugin triggers that action (StartAttack is "press the attack
+; button", EndAttack is "let go of it").
+; In the first test in the game the companion did not draw its bow that way, neither in the saddle nor on foot, and
+; put the bow away at once. Why is not known. So a shot is tried in two ways now, and each try writes down what the
+; game does meanwhile (see TryShot): the notes go out with the report and are read in the log of the server.
+; The companion looks at its target; nothing else tells the game whom the arrow is for
 
 ; Returns why the companion cannot shoot now, or "" if it can
 string Function GetShootProblem(Actor companion)
-    If _nativeVersion < NativeVersionWithActions
-        Return "shoot needs the plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version " + NativeVersionWithActions + " or newer)."
+    If _nativeVersion < NativeVersionWithAttack
+        Return "shoot needs the plugin of the game mod (KI_MCP_Gefaehrte.dll, interface version " + NativeVersionWithAttack + " or newer)."
     EndIf
     If _isShooting
         Return "You are still shooting. Wait until that arrow is gone."
@@ -4139,7 +4166,42 @@ Function ShootArrow(Actor companion, Actor shootTarget)
     If !isRiding && shootTarget.Is3DLoaded() && IsHoldingStill(companion)
         TurnTo(companion, companion.GetAngleZ() + companion.GetHeadingAngle(shootTarget))
     EndIf
-    If !wasDrawn
+    If !TakeBowOut(companion)
+        RestoreLook(companion)
+        AddFailReport("You could not shoot at " + targetName + ": your bow did not come into your hands" + saddleText + " within a few seconds. Something keeps your weapons away (passive with 'full' does, and so does sheathe).")
+        Return
+    EndIf
+    Utility.Wait(ShootReadySeconds)
+    ; The first way: what the attack button does for the player. With a bow in the hands that draws it
+    string shotNotes = "by action: " + TryShot(companion, true)
+    If !_isShotDrawn
+        ; The second way, if the first did not get the bow drawn: the events of the animation themselves
+        If TakeBowOut(companion)
+            Utility.Wait(ShootReadySeconds)
+            shotNotes = shotNotes + " | by event: " + TryShot(companion, false)
+        Else
+            shotNotes = shotNotes + " | by event: not tried, the bow did not come out again"
+        EndIf
+    EndIf
+    bool isDrawn = _isShotDrawn
+    bool isReleased = _isShotReleased
+    RestoreLook(companion)
+    If !wasDrawn && !companion.IsInCombat()
+        companion.SheatheWeapon()
+    EndIf
+    shotNotes = " Notes for the builders of the mod, not to be read out: " + shotNotes + "."
+    If isDrawn && isReleased
+        AddReport("You drew your bow" + saddleText + " and let an arrow fly at " + targetName + ". Whether it hit, 'Events' or the player tell." + shotNotes)
+    ElseIf isDrawn
+        AddFailReport("You drew your bow" + saddleText + ", but the game did not show that you let go of it: whether an arrow flew at " + targetName + ", only the player can tell." + shotNotes)
+    Else
+        AddFailReport("The game did not let you draw your bow" + saddleText + ": no arrow was shot at " + targetName + ". Either you have no arrows on, or the game does not let you do this here." + shotNotes)
+    EndIf
+EndFunction
+
+; Takes the weapon into the hands and waits for it. Returns whether it is there
+bool Function TakeBowOut(Actor companion)
+    If !companion.IsWeaponDrawn()
         companion.DrawWeapon()
     EndIf
     float waited = 0.0
@@ -4147,37 +4209,94 @@ Function ShootArrow(Actor companion, Actor shootTarget)
         Utility.Wait(ShootCheckSeconds)
         waited += ShootCheckSeconds
     EndWhile
-    If !companion.IsWeaponDrawn()
-        RestoreLook(companion)
-        AddFailReport("You could not shoot at " + targetName + ": your bow did not come into your hands" + saddleText + " within a few seconds. Something keeps your weapons away (passive with 'full' does, and so does sheathe).")
-        Return
+    Return companion.IsWeaponDrawn()
+EndFunction
+
+; One try at a shot: by the action of the attack button (isByAction), or by the events of the animation themselves.
+; Every ShootCheckSeconds it looks at how far the game says the companion is with its bow ("state", see
+; GetAttackState of the plugin: 8 = drawing, 9 = arrow on, 10 = drawn, 11 and 12 = letting go, 13 and 14 = after the
+; shot), whether the weapon is still in its hands ("out") and whether the animation tells the bow as drawn ("drawn"),
+; and writes down every change with the seconds since the try began. "action taken" is what the game said to the
+; action: 1 = it took it, 0 = it refused it, -1 = it has not got to it yet.
+; Returns what was written down, and sets _isShotDrawn and _isShotReleased
+string Function TryShot(Actor companion, bool isByAction)
+    _isShotDrawn = false
+    _isShotReleased = false
+    float startTime = Utility.GetCurrentRealTime()
+    string shotNotes = "weapon out " + GetFlagText(companion.IsWeaponDrawn())
+    If isByAction
+        KI_MCP_Gefaehrte_Native.StartAttack(companion)
+    Else
+        Debug.SendAnimationEvent(companion, BowStartEvent)
     EndIf
-    Utility.Wait(ShootReadySeconds)
-    ; What the attack button does for the player: with a bow in the hands that draws it
-    KI_MCP_Gefaehrte_Native.StartHandCast(companion, None)
-    bool isBowDrawn = false
-    waited = 0.0
-    While !isBowDrawn && waited < ShootNockSeconds
+    bool hasActionResult = !isByAction
+    bool hasSample = false
+    int lastState = 0
+    bool wasOut = false
+    bool wasGraphDrawn = false
+    While !_isShotDrawn && Utility.GetCurrentRealTime() - startTime < ShootNockSeconds
         Utility.Wait(ShootCheckSeconds)
-        waited += ShootCheckSeconds
-        isBowDrawn = companion.GetAnimationVariableBool(BowDrawnVariable)
+        If !hasActionResult
+            hasActionResult = true
+            shotNotes = shotNotes + ", action taken " + KI_MCP_Gefaehrte_Native.GetAttackActionResult()
+        EndIf
+        int attackState = KI_MCP_Gefaehrte_Native.GetAttackState(companion)
+        bool isOut = companion.IsWeaponDrawn()
+        bool isGraphDrawn = companion.GetAnimationVariableBool(BowDrawnVariable)
+        If !hasSample || attackState != lastState || isOut != wasOut || isGraphDrawn != wasGraphDrawn
+            hasSample = true
+            lastState = attackState
+            wasOut = isOut
+            wasGraphDrawn = isGraphDrawn
+            shotNotes = shotNotes + ", " + GetShotTimeText(startTime) + " state " + attackState + " out " + GetFlagText(isOut) + " drawn " + GetFlagText(isGraphDrawn)
+        EndIf
+        _isShotDrawn = attackState == AttackStateBowDrawn || isGraphDrawn
     EndWhile
-    If isBowDrawn
+    If _isShotDrawn
         Utility.Wait(ShootAimSeconds)
     EndIf
-    ; Letting go of the button: the game lets the arrow fly. Also done if the bow never showed as drawn, so that
-    ; nothing stays half begun
-    KI_MCP_Gefaehrte_Native.EndHandCast(companion)
-    Utility.Wait(ShootReleaseSeconds)
-    RestoreLook(companion)
-    If !wasDrawn && !companion.IsInCombat()
-        companion.SheatheWeapon()
-    EndIf
-    If isBowDrawn
-        AddReport("You drew your bow" + saddleText + " and let an arrow fly at " + targetName + ". Whether it hit, 'Events' or the player tell.")
+    ; Letting go: the game lets the arrow fly. Also done if the bow never showed as drawn, so that nothing stays
+    ; half begun
+    If isByAction
+        KI_MCP_Gefaehrte_Native.EndAttack(companion)
     Else
-        AddFailReport("The game did not let you draw your bow" + saddleText + ": no arrow was shot at " + targetName + ". Either you have no arrows on, or the game does not let you do this here.")
+        Debug.SendAnimationEvent(companion, BowReleaseEvent)
     EndIf
+    shotNotes = shotNotes + "; let go at " + GetShotTimeText(startTime)
+    bool hasReleaseResult = !isByAction
+    float releaseTime = Utility.GetCurrentRealTime()
+    While Utility.GetCurrentRealTime() - releaseTime < ShootReleaseSeconds
+        Utility.Wait(ShootCheckSeconds)
+        If !hasReleaseResult
+            hasReleaseResult = true
+            shotNotes = shotNotes + ", action taken " + KI_MCP_Gefaehrte_Native.GetAttackActionResult()
+        EndIf
+        int releaseState = KI_MCP_Gefaehrte_Native.GetAttackState(companion)
+        bool isStillOut = companion.IsWeaponDrawn()
+        If releaseState != lastState || isStillOut != wasOut
+            lastState = releaseState
+            wasOut = isStillOut
+            shotNotes = shotNotes + ", " + GetShotTimeText(startTime) + " state " + releaseState + " out " + GetFlagText(isStillOut)
+        EndIf
+        If releaseState >= AttackStateBowReleasing && releaseState <= AttackStateBowFollowThrough
+            _isShotReleased = true
+        EndIf
+    EndWhile
+    Return shotNotes
+EndFunction
+
+; "1" for yes and "0" for no, for the notes of a shot
+string Function GetFlagText(bool isSet)
+    If isSet
+        Return "1"
+    EndIf
+    Return "0"
+EndFunction
+
+; The seconds since startTime with one digit behind the point, for the notes of a shot
+string Function GetShotTimeText(float startTime)
+    int tenths = ((Utility.GetCurrentRealTime() - startTime) * 10.0) as int
+    Return "" + (tenths / 10) + "." + (tenths % 10) + " s"
 EndFunction
 
 ; ---------------------------------------------------------------------- items
@@ -6699,6 +6818,64 @@ ReferenceAlias Function GetRideWalkAlias(int aliasId)
     Return _rideWalkQuest.GetAlias(aliasId) as ReferenceAlias
 EndFunction
 
+ReferenceAlias Function GetRideCalmAlias(int aliasId)
+    If !_rideCalmQuest
+        _rideCalmQuest = Game.GetFormFromFile(RideCalmQuestFormId, OwnPluginFile) as Quest
+    EndIf
+    If !_rideCalmQuest
+        Return None
+    EndIf
+    If !_rideCalmQuest.IsRunning()
+        _rideCalmQuest.Start()
+    EndIf
+    Return _rideCalmQuest.GetAlias(aliasId) as ReferenceAlias
+EndFunction
+
+; passive with "full" in the saddle (see RideCalmQuestFormId): puts the companion into the alias whose riding package
+; ignores fights, or takes it out again. It is in there while it does not fight at all, is to ride, and rides after
+; the player (not to a target, not after someone else, not waiting in the saddle, not getting off). Called once a
+; second by the follow watch and at once where one of these changes. Costs no question to the game while the
+; companion fights as always
+Function UpdateRideCalm(Actor companion)
+    bool isWanted = companion && _isCalm && _passiveActor == companion && !_isDismounting && !_isRideHolding && !_rideLeader && !_rideTarget && IsRideWanted()
+    If isWanted == _isRideCalm
+        Return
+    EndIf
+    If !isWanted
+        EndRideCalm()
+        Return
+    EndIf
+    ReferenceAlias calmRider = GetRideCalmAlias(RideCalmAliasRider)
+    ReferenceAlias calmLeader = GetRideCalmAlias(RideCalmAliasLeader)
+    If !calmRider || !calmLeader
+        ; A plugin file of the mod from before this quest
+        Return
+    EndIf
+    calmLeader.ForceRefTo(Game.GetPlayer())
+    calmRider.ForceRefTo(companion)
+    _isRideCalm = true
+    companion.EvaluatePackage()
+EndFunction
+
+; Takes the companion out of the riding package that ignores fights
+Function EndRideCalm()
+    If !_isRideCalm
+        Return
+    EndIf
+    _isRideCalm = false
+    ReferenceAlias calmRider = GetRideCalmAlias(RideCalmAliasRider)
+    ReferenceAlias calmLeader = GetRideCalmAlias(RideCalmAliasLeader)
+    If !calmRider || !calmLeader
+        Return
+    EndIf
+    Actor calmedRider = calmRider.GetActorReference()
+    calmRider.Clear()
+    calmLeader.Clear()
+    If calmedRider
+        calmedRider.EvaluatePackage()
+    EndIf
+EndFunction
+
 ; The marker for a spot the companion rides to or waits at in the saddle (its own, the walks have theirs)
 ObjectReference Function GetRideMarker(Actor companion)
     If !_rideMarker
@@ -7008,6 +7185,7 @@ string Function DoRideMove(Actor companion, string actionName, int commandHandle
     If _rideTarget
         SendModEvent(EVENT_RIDE_WATCH, "", _rideWatchNumber as float)
     EndIf
+    UpdateRideCalm(companion)
     _isRideMoveOk = true
     Return doneText
 EndFunction
@@ -7493,6 +7671,7 @@ string Function StartRiding(Actor companion)
     SetRidePace(companion, None, false)
     GetHorseAlias(HorseAliasLeader).ForceRefTo(Game.GetPlayer())
     GetHorseAlias(HorseAliasRider).ForceRefTo(companion)
+    UpdateRideCalm(companion)
     ownHorse.EvaluatePackage()
     companion.EvaluatePackage()
     _isMounting = true
@@ -7584,6 +7763,7 @@ Function StopRiding(Actor companion)
     _isMounting = false
     _mountNumber += 1
     _rideWatchNumber += 1
+    EndRideCalm()
     ClearRideTravel()
     SetRidePace(companion, None, false)
     ReferenceAlias riderAlias = GetHorseAlias(HorseAliasRider)
@@ -7911,6 +8091,7 @@ Event OnFollowWatchRequested(string eventName, string strArg, float numArg, Form
             CheckCatchUp()
             UpdateSneak(watched)
             UpdatePassive(watched)
+            UpdateRideCalm(watched)
             UpdateHold(watched)
             UpdateCover(watched)
             ; Every question to the game costs the script a picture of the game, and all of this together took about
@@ -8048,7 +8229,7 @@ string Function SetPassive(Actor companion, string wanted)
     EndIf
     If isFullWanted
         StartCalm(companion)
-        Return "You do not fight at all now: you start no fight and you do not fight back either, not even when you are hit. In a fight you keep close to the player. This holds until passive with 'on' (you defend yourself again) or 'off', or until you are told to attack."
+        Return "You do not fight at all now: you start no fight and you do not fight back either, not even when you are hit. In a fight you keep close to the player. On your horse, riding after the player, you are meant to stay in the saddle when a fight begins: that is new and still being tested. This holds until passive with 'on' (you defend yourself again) or 'off', or until you are told to attack."
     EndIf
     If _isCalm
         EndCalm()
@@ -8091,6 +8272,7 @@ Function StartCalm(Actor companion)
     _isCalm = true
     companion.StopCombat()
     companion.EvaluatePackage()
+    UpdateRideCalm(companion)
 EndFunction
 
 Function EndCalm()
@@ -8098,6 +8280,7 @@ Function EndCalm()
         Return
     EndIf
     _isCalm = false
+    EndRideCalm()
     ReferenceAlias calmAlias = GetCalmAlias(CalmAliasCalm)
     ReferenceAlias leaderAlias = GetCalmAlias(CalmAliasLeader)
     If !calmAlias || !leaderAlias

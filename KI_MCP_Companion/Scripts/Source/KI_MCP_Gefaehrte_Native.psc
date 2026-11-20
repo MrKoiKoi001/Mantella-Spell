@@ -227,6 +227,23 @@ bool Function EndHandCast(Actor caster) global native
 ; the spell, 6 = it casts). -1 = cannot tell
 int Function GetHandCastState(Actor caster) global native
 
+; Pressing the attack button for a character, whatever it holds: with a bow in its hands the game draws it. Other
+; than StartHandCast this asks for no spell, and the plugin keeps what the game said to the action (see
+; GetAttackActionResult). Returns whether it could be handed to the game; it runs a moment later
+bool Function StartAttack(Actor attacker) global native
+
+; Letting go of the attack button: a drawn bow lets its arrow fly. Keeps what the game said, as StartAttack does
+bool Function EndAttack(Actor attacker) global native
+
+; What the game said to the last action of StartAttack or EndAttack: 1 = it took it, 0 = it refused it,
+; -1 = the action has not been carried out yet
+int Function GetAttackActionResult() global native
+
+; How far a character is with an attack, as the game numbers it: 0 = it does nothing, 1 to 6 = a blow, 8 = it draws
+; its bow, 9 = the arrow is on, 10 = the bow is drawn, 11 = it lets go, 12 = it has let go, 13 and 14 = after the
+; shot. -1 = cannot tell
+int Function GetAttackState(Actor attacker) global native
+
 ; An inventory in one go. filter: 0 = everything, 1 = only the favorites, 2 = only what is worn and held. The
 ; favorites of the player are what the game has among its favorites; for everybody else they are the items in
 ; "marked". The first text is how many kinds of items passed the filter, then one text per item, at most maxItems,
