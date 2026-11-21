@@ -252,6 +252,11 @@ bool Function SetArrowTarget(Actor shooter, ObjectReference target) global nativ
 ; How many arrows were sent to the target since SetArrowTarget set it
 int Function GetAimedArrowCount() global native
 
+; (Interface version 43) What the aiming saw since SetArrowTarget set the target, for the notes of the builders of
+; the mod: whether it could listen to the animation of the shooter, the names of the events of that animation, and in
+; which search how many young arrows there were and how many of them the shooter shot
+string Function GetArrowAimNotes() global native
+
 ; An inventory in one go. filter: 0 = everything, 1 = only the favorites, 2 = only what is worn and held. The
 ; favorites of the player are what the game has among its favorites; for everybody else they are the items in
 ; "marked". The first text is how many kinds of items passed the filter, then one text per item, at most maxItems,

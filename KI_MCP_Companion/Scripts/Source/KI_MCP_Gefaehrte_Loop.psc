@@ -689,6 +689,8 @@ int Property NativeVersionWithAttack = 41 AutoReadOnly
 ; From interface version 42 on the SKSE plugin can send the arrows of a character to a target (SetArrowTarget,
 ; GetAimedArrowCount). Without a target an arrow flies straight ahead: in a test it hit the player in front
 int Property NativeVersionWithArrowAim = 42 AutoReadOnly
+; From interface version 43 on the plugin tells what the aiming saw (GetArrowAimNotes)
+int Property NativeVersionWithArrowNotes = 43 AutoReadOnly
 ; From interface version 19 on the SKSE plugin can say whom a character looks at while it speaks (SetTalkTarget).
 ; The game puts the player there for every line spoken with Actor.Say, and that comes before what Actor.SetLookAt sets
 int Property NativeVersionWithTalkTarget = 19 AutoReadOnly
@@ -1411,6 +1413,12 @@ Function StartLoop()
         If _nativeVersion >= NativeVersionWithHearing
             _isHearing = KI_MCP_Gefaehrte_Native.IsHearing()
         EndIf
+    EndIf
+    ; Koi's wish: see at once which plugin runs (its interface version), shown top left after every load
+    If _nativeVersion > 0
+        Debug.Notification("KI-Gefaehrtin: Plugin " + _nativeVersion)
+    Else
+        Debug.Notification("KI-Gefaehrtin: kein Plugin")
     EndIf
     _isContactShown = false
     _pollId = Utility.RandomInt(1, 1000000)
@@ -4202,6 +4210,9 @@ Function ShootArrow(Actor companion, Actor shootTarget)
     bool isReleased = _isShotReleased
     If canAim
         shotNotes = shotNotes + " | aimed " + KI_MCP_Gefaehrte_Native.GetAimedArrowCount()
+        If _nativeVersion >= NativeVersionWithArrowNotes
+            shotNotes = shotNotes + " (" + KI_MCP_Gefaehrte_Native.GetArrowAimNotes() + ")"
+        EndIf
         KI_MCP_Gefaehrte_Native.SetArrowTarget(companion, None)
     Else
         shotNotes = shotNotes + " | not aimed, plugin older than " + NativeVersionWithArrowAim
